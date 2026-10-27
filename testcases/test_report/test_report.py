@@ -194,6 +194,40 @@ class TestReport:
         after = float(s["rpt"].buy_and_sale_statistics().get("todaySale") or 0)
         assert after - before == 20.0, f"今日销售应即时+20(R4): {before}→{after}"
 
+    @allure.title("DEF-EXP-08 级联回归:NULL 字段单使首页统计500,删除后恢复(db_check)")
+    @pytest.mark.db_check
+    def test_012b_def_exp_08_cascade(self, report_env):
+        """缺陷链:DEF-EXP-03(漏传 discountLastMoney 不校验)→ 字段落 NULL
+        → 首页统计 BigDecimal.add NPE → getBuyAndSaleStatistics 整体 500。
+        断言缺陷现状:构造触发单→500;删除触发单→恢复 200。修复后(接口容错 NULL)
+        第一段应翻转。"""
+        s = report_env
+        # 前置自清:环境若已有历史 NULL 触发单,先移除,保证"恢复"断言自洽
+        stale = s["db"].query(
+            "SELECT id FROM jsh_depot_head WHERE tenant_id=%s AND delete_flag=0 "
+            "AND (type='入库' OR type='出库') AND discount_last_money IS NULL",
+            (s["tenant_id"],))
+        for r0 in stale:
+            s["bill"].delete_batch([r0["id"]])
+        # 构造触发单(漏传 discountLastMoney,不登记 teardown——用例内自行删除)
+        no = "CGRK" + s["bill"].build_number()
+        info = {"operTime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "number": no,
+                "type": "入库", "subType": "采购", "organId": s["supplier_id"],
+                "accountId": s["account_id"], "changeAmount": -100,
+                "totalPrice": -100, "status": "0"}
+        rows = [{"materialId": s["material_id"], "barCode": s["bar_code"], "depotId": s["depot_id"],
+                 "operNumber": 10, "unitPrice": 10, "allPrice": 100, "taxRate": 0,
+                 "taxMoney": 0, "taxLastMoney": 100, "unit": "个"}]
+        assert_code_ok(s["bill"].add(info, rows), "构造 NULL 字段触发单")
+        trigger = s["bill"].get_detail_by_number(no).json()["data"]["id"]
+        try:
+            body = s["client"].get("/depotHead/getBuyAndSaleStatistics").json()
+            assert body.get("code") == 500, f"缺陷现状:触发单应使首页统计500,实际: {body}"
+        finally:
+            s["bill"].delete_batch([trigger])
+        recovered = s["client"].get("/depotHead/getBuyAndSaleStatistics").json()
+        assert recovered.get("code") == 200, f"删除触发单后应恢复200: {recovered}"
+
     @allure.title("API-DEP-011 商品库存查询:按名过滤含商品行(db_check)")
     @pytest.mark.db_check
     def test_011b_list_with_stock(self, report_env):
