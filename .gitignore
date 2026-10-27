@@ -1,0 +1,9 @@
+.idea/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+logs/
+reports/
+config/env.local.yaml
+postman/reports/
