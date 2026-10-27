@@ -1,0 +1,6 @@
+pytest>=8
+requests>=2.31
+PyMySQL>=1.1
+PyYAML>=6
+allure-pytest>=2.13
+cryptography>=42

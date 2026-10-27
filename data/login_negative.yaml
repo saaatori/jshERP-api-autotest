@@ -1,0 +1,52 @@
+# 登录参数异常矩阵(API-AUTH-002/003/005/006/007/008/009)
+# 2026-10-27 实测取证:空用户名/不存在/超长256/SQL注入样例均返回 user is not exist(未绕过登录);
+# 空/错误/明文密码均返回 user password error。断言按实测钉死。
+- case_id: API-AUTH-002
+  title: 密码错误被拒
+  login_name: jsh
+  password_mode: md5          # md5=按正常流程加密后提交;raw=原样提交
+  password: wrong-password
+  expect_msg: user password error
+
+- case_id: API-AUTH-003
+  title: 用户不存在被拒
+  login_name: EXPnoSuchUser01
+  password_mode: md5
+  password: "123456"
+  expect_msg: user is not exist
+
+- case_id: API-AUTH-005
+  title: 明文密码登录失败(证明必须MD5提交)
+  login_name: jsh
+  password_mode: raw
+  password: "123456"
+  expect_msg: user password error
+
+- case_id: API-AUTH-006
+  title: 用户名为空按不存在处理
+  login_name: ""
+  password_mode: md5
+  password: ""
+  expect_msg: user is not exist
+
+- case_id: API-AUTH-007
+  title: 密码为空被拒
+  login_name: jsh
+  password_mode: raw
+  password: ""
+  expect_msg: user password error
+
+- case_id: API-AUTH-008
+  title: 用户名超长256字符按不存在处理且无500
+  login_name_char: "E"       # 超长字符串由代码按 char*len 生成,不在 yaml 手写
+  login_name_len: 256
+  password_mode: md5
+  password: "123456"
+  expect_msg: user is not exist
+
+- case_id: API-AUTH-009
+  title: SQL注入样例未绕过登录
+  login_name: "' or '1'='1"
+  password_mode: md5
+  password: "123456"
+  expect_msg: user is not exist

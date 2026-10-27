@@ -1,0 +1,28 @@
+# 采购入库参数异常矩阵(API-PUR-004~008)
+# 2026-10-27 实测取证:5 组参数全部放行(code=200 建单成功)——数量与单价无任何校验,
+# 与供应商无唯一性/必填校验同源(系统性"校验不一致"缺陷)。
+# expect_created=true 表示断言当前实际行为(放行);系统修复后翻转为 false 并补 expect_keywords。
+- case_id: API-PUR-004
+  title: 数量为0建单
+  row_overrides: { operNumber: 0 }
+  expect_created: true
+
+- case_id: API-PUR-005
+  title: 数量为负数建单
+  row_overrides: { operNumber: -5 }
+  expect_created: true
+
+- case_id: API-PUR-006
+  title: 数量为小数建单
+  row_overrides: { operNumber: 1.5 }
+  expect_created: true
+
+- case_id: API-PUR-007
+  title: 数量为超大值(10^9)建单
+  row_overrides: { operNumber: 1000000000 }
+  expect_created: true
+
+- case_id: API-PUR-008
+  title: 单价为负数建单
+  row_overrides: { unitPrice: -10 }
+  expect_created: true

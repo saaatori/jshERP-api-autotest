@@ -1,0 +1,48 @@
+# 通用查询分页边界矩阵(API-COM-001~009,目标接口 /depotHead/list)
+# 实测:该接口 search 缺 type/subType 时返回 code 300"数据查询异常",矩阵统一带基础过滤参数。
+# 断言统一:no 500、code=200、rows 数量与 max_rows/empty 约束一致
+- case_id: API-COM-001
+  title: currentPage=0 边界
+  params: { currentPage: 0, pageSize: 10, type: 入库, subType: 采购 }
+  expect: { max_rows: 10 }
+
+- case_id: API-COM-002
+  title: currentPage=1 正常分页
+  params: { currentPage: 1, pageSize: 10, type: 入库, subType: 采购 }
+  expect: { max_rows: 10, total_int: true }
+
+- case_id: API-COM-003
+  title: currentPage 超大值(实测返回行,不空集——按实际行为记录)
+  params: { currentPage: 1000000, pageSize: 10, type: 入库, subType: 采购 }
+  expect: { max_rows: 10 }
+
+- case_id: API-COM-004
+  title: pageSize=0
+  params: { currentPage: 1, pageSize: 0, type: 入库, subType: 采购 }
+  expect: {}
+
+- case_id: API-COM-005
+  title: pageSize=1 最小分页
+  params: { currentPage: 1, pageSize: 1, type: 入库, subType: 采购 }
+  expect: { max_rows: 1 }
+
+- case_id: API-COM-006
+  title: pageSize=1000 大分页
+  params: { currentPage: 1, pageSize: 1000, type: 入库, subType: 采购 }
+  expect: {}
+
+- case_id: API-COM-007
+  title: 单号模糊查询命中预置单
+  params: { currentPage: 1, pageSize: 50, type: 入库, subType: 采购, number: "CGRK" }
+  expect: { min_rows: 1 }
+
+- case_id: API-COM-008
+  title: 日期开始大于结束
+  params: { currentPage: 1, pageSize: 10, type: 入库, subType: 采购, beginTime: "2026-12-31", endTime: "2026-01-01" }
+  expect: {}
+
+- case_id: API-COM-009
+  title: search 非法 JSON 串不产生 500
+  params: { currentPage: 1, pageSize: 10 }
+  raw_search: "not-a-json{{{"
+  expect: {}

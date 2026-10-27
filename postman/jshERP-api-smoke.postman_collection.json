@@ -1,0 +1,764 @@
+{
+  "info": {
+    "_postman_id": "0670c399-b7e3-4f15-b255-2b4feabbaefc",
+    "name": "jshERP-api-smoke",
+    "description": "管伊佳ERP冒烟集(简化版15条):登录→建商品→采购入库(欠款断言)→销售出库(库存断言)→清理。全程未审核保存(R4保存即入账),无订单/审核/转单。\n\n**必须配置:Runner Delay=2000ms**(防DEF-EXP-06防攻击注销:同用户同日志模块同IP~1.5s内二次操作即强制登出,1100ms实测不安全);Newman用 --delay 2000。\n演示数据ID:供应商57/客户58/仓库14/账户17(环境变量)。断言纪律:绝不只断言code==200。",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "54248265",
+    "_collection_link": "https://go.postman.co/collection/54248265-0670c399-b7e3-4f15-b255-2b4feabbaefc?source=collection_link"
+  },
+  "item": [
+    {
+      "name": "00_登录与鉴权",
+      "item": [
+        {
+          "name": "登录",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.environment.set(\"md5pwd\", CryptoJS.MD5(pm.environment.get(\"password\")).toString());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"登录成功(成败以msgTip判定,失败也是code200)\", () => {",
+                  "    pm.expect(json.code).to.eql(200);",
+                  "    pm.expect(json.data.msgTip).to.eql(\"user can login\");",
+                  "});",
+                  "pm.test(\"token格式=UUID_租户ID(后缀63)\", () => {",
+                  "    pm.expect(json.data.token).to.match(/^[0-9a-f]{32}_63$/);",
+                  "});",
+                  "pm.test(\"响应密码字段已脱敏\", () => pm.expect(json.data.user.password).to.be.null);",
+                  "pm.environment.set(\"token\", json.data.token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"loginName\": \"{{loginName}}\",\n    \"password\": \"{{md5pwd}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/jshERP-boot/user/login",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "jshERP-boot",
+                "user",
+                "login"
+              ]
+            },
+            "description": "密码明文123456,脚本内MD5后提交;验证码环境checkcode_flag=0"
+          },
+          "response": []
+        },
+        {
+          "name": "会话验证",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test(\"携带token返回会话信息\", () => {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(json.code).to.eql(200);",
+                  "    pm.expect(json.data.user.id).to.eql(63);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Access-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/jshERP-boot/user/getUserSession",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "jshERP-boot",
+                "user",
+                "getUserSession"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "01_基础资料",
+      "item": [
+        {
+          "name": "新增商品",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.environment.set(\"runId\", Date.now().toString().slice(-6));",
+                  "pm.environment.set(\"materialName\", \"EXPF\" + pm.environment.get(\"runId\"));",
+                  "pm.environment.set(\"barCode\", \"EXPF\" + pm.environment.get(\"runId\"));",
+                  "pm.environment.set(\"nowTime\", new Date().toLocaleString('sv-SE'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"商品新增成功\", () => pm.expect(json.code).to.eql(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Access-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"name\": \"{{materialName}}\",\n    \"unit\": \"个\",\n    \"mnemonic\": \"EXPFsp\",\n    \"meList\": [\n        {\n            \"id\": \"\",\n            \"barCode\": \"{{barCode}}\",\n            \"commodityUnit\": \"个\",\n            \"sku\": \"\",\n            \"purchaseDecimal\": \"10\",\n            \"commodityDecimal\": \"20\",\n            \"wholesaleDecimal\": \"\",\n            \"lowDecimal\": \"20\"\n        }\n    ],\n    \"stock\": [],\n    \"sortList\": [],\n    \"unitId\": \"\",\n    \"imgName\": \"\",\n    \"meDeleteIdList\": []\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/jshERP-boot/material/add",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "jshERP-boot",
+                "material",
+                "add"
+              ]
+            },
+            "description": "名称/条码用EXPF+runId保证可重复执行;采购价10零售价20最低售价20(出库单价=最低价放行)"
+          },
+          "response": []
+        },
+        {
+          "name": "查询新增商品提ID",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "const row = json.data.rows.find(r => r.name === pm.environment.get(\"materialName\"));",
+                  "pm.test(\"按名称过滤到唯一商品(客户端过滤,规避URL编码坑)\", () => {",
+                  "    pm.expect(row, \"未找到新建商品\").to.not.be.undefined;",
+                  "});",
+                  "pm.environment.set(\"materialId\", row.id);",
+                  "console.log(\"基线库存:\", row.stock);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Access-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/jshERP-boot/material/list?currentPage=1&pageSize=50",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "jshERP-boot",
+                "material",
+                "list"
+              ],
+              "query": [
+                {
+                  "key": "currentPage",
+                  "value": "1"
+                },
+                {
+                  "key": "pageSize",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "列表按创建时间降序,新建商品在首行;过滤在Tests脚本内按名称find——不用search参数(实测Postman对URL内JSON/中文/预编码均会破坏)"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "02_采购入库",
+      "item": [
+        {
+          "name": "取采购入库编号",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test(\"取号成功\", () => pm.expect(json.code).to.eql(200));",
+                  "pm.environment.set(\"billNoIn\", \"CGRK\" + json.data.defaultNumber);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Access-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/jshERP-boot/sequence/buildNumber",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "jshERP-boot",
+                "sequence",
+                "buildNumber"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "新增采购入库(3个付20未审核)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.environment.set(\"nowTime\", new Date().toLocaleString('sv-SE'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test(\"采购入库成功\", () => {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(json.code).to.eql(200);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Access-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"info\": \"{\\\"operTime\\\":\\\"{{nowTime}}\\\",\\\"number\\\":\\\"{{billNoIn}}\\\",\\\"type\\\":\\\"入库\\\",\\\"subType\\\":\\\"采购\\\",\\\"organId\\\":{{supplierId}},\\\"accountId\\\":{{accountId}},\\\"changeAmount\\\":-20,\\\"discountLastMoney\\\":30,\\\"totalPrice\\\":-30,\\\"status\\\":\\\"0\\\",\\\"remark\\\":\\\"SMOKE\\\"}\",\n    \"rows\": \"[{\\\"materialId\\\":{{materialId}},\\\"barCode\\\":\\\"{{barCode}}\\\",\\\"depotId\\\":{{depotId}},\\\"operNumber\\\":3,\\\"unitPrice\\\":10,\\\"allPrice\\\":30,\\\"taxRate\\\":0,\\\"taxMoney\\\":0,\\\"taxLastMoney\\\":30,\\\"unit\\\":\\\"个\\\",\\\"remark\\\":\\\"SMOKE\\\"}]\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/jshERP-boot/depotHead/addDepotHeadAndDetail",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "jshERP-boot",
+                "depotHead",
+                "addDepotHeadAndDetail"
+              ]
+            },
+            "description": "关键约定:入库类头表金额为负(totalPrice=-30/changeAmount=-20);discountLastMoney必带(漏传欠款错算DEF-EXP-03);accountId必带(8500007);status=0未审核保存即入账(R4)"
+          },
+          "response": []
+        },
+        {
+          "name": "查入库单断言欠款并提ID",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test(\"入库单存在且本次欠款=10(30-20,R2公式)\", () => {",
+                  "    pm.expect(json.code).to.eql(200);",
+                  "    pm.expect(json.data.number).to.eql(pm.environment.get(\"billNoIn\"));",
+                  "    pm.expect(Number(json.data.debt)).to.eql(10);",
+                  "});",
+                  "pm.environment.set(\"purchaseBillId\", json.data.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Access-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/jshERP-boot/depotHead/getDetailByNumber?number={{billNoIn}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "jshERP-boot",
+                "depotHead",
+                "getDetailByNumber"
+              ],
+              "query": [
+                {
+                  "key": "number",
+                  "value": "{{billNoIn}}"
+                }
+              ]
+            },
+            "description": "纯ASCII参数(单号),同步Tests提ID——实测data含id/number/debt,status;不再用search参数(编码坑)与sendRequest(变量回调不可靠)"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "03_销售出库",
+      "item": [
+        {
+          "name": "取销售出库编号",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test(\"取号成功\", () => pm.expect(json.code).to.eql(200));",
+                  "pm.environment.set(\"billNoOut\", \"XSCK\" + json.data.defaultNumber);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Access-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/jshERP-boot/sequence/buildNumber",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "jshERP-boot",
+                "sequence",
+                "buildNumber"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "新增销售出库(1个收20未审核)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.environment.set(\"nowTime\", new Date().toLocaleString('sv-SE'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test(\"销售出库成功\", () => {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(json.code).to.eql(200);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Access-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"info\": \"{\\\"operTime\\\":\\\"{{nowTime}}\\\",\\\"number\\\":\\\"{{billNoOut}}\\\",\\\"type\\\":\\\"出库\\\",\\\"subType\\\":\\\"销售\\\",\\\"organId\\\":{{customerId}},\\\"accountId\\\":{{accountId}},\\\"changeAmount\\\":20,\\\"discountLastMoney\\\":20,\\\"totalPrice\\\":20,\\\"status\\\":\\\"0\\\",\\\"remark\\\":\\\"SMOKE\\\"}\",\n    \"rows\": \"[{\\\"materialId\\\":{{materialId}},\\\"barCode\\\":\\\"{{barCode}}\\\",\\\"depotId\\\":{{depotId}},\\\"operNumber\\\":1,\\\"unitPrice\\\":20,\\\"allPrice\\\":20,\\\"taxRate\\\":0,\\\"taxMoney\\\":0,\\\"taxLastMoney\\\":20,\\\"unit\\\":\\\"个\\\",\\\"remark\\\":\\\"SMOKE\\\"}]\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/jshERP-boot/depotHead/addDepotHeadAndDetail",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "jshERP-boot",
+                "depotHead",
+                "addDepotHeadAndDetail"
+              ]
+            },
+            "description": "出库类头表金额为正;单价20=最低售价(等于放行,低于被8500018拦截)"
+          },
+          "response": []
+        },
+        {
+          "name": "查出库单提ID",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test(\"出库单存在\", () => {",
+                  "    pm.expect(json.code).to.eql(200);",
+                  "    pm.expect(json.data.number).to.eql(pm.environment.get(\"billNoOut\"));",
+                  "});",
+                  "pm.environment.set(\"saleBillId\", json.data.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Access-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/jshERP-boot/depotHead/getDetailByNumber?number={{billNoOut}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "jshERP-boot",
+                "depotHead",
+                "getDetailByNumber"
+              ],
+              "query": [
+                {
+                  "key": "number",
+                  "value": "{{billNoOut}}"
+                }
+              ]
+            },
+            "description": "纯ASCII参数,同步Tests提ID"
+          },
+          "response": []
+        },
+        {
+          "name": "查商品库存断言",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "const row = json.data.rows.find(r => r.name === pm.environment.get(\"materialName\"));",
+                  "pm.test(\"库存断言=2(入3-销1,保存即入账R4)\", () => {",
+                  "    pm.expect(row).to.not.be.undefined;",
+                  "    pm.expect(Number(row.stock)).to.eql(2);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Access-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/jshERP-boot/material/list?currentPage=1&pageSize=50",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "jshERP-boot",
+                "material",
+                "list"
+              ],
+              "query": [
+                {
+                  "key": "currentPage",
+                  "value": "1"
+                },
+                {
+                  "key": "pageSize",
+                  "value": "50"
+                }
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "05_数据清理",
+      "item": [
+        {
+          "name": "删除销售出库单",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test(\"删除成功\", () => {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(json.code).to.eql(200);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-Access-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/jshERP-boot/depotHead/deleteBatch?ids={{saleBillId}},",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "jshERP-boot",
+                "depotHead",
+                "deleteBatch"
+              ],
+              "query": [
+                {
+                  "key": "ids",
+                  "value": "{{saleBillId}},"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "删除采购入库单",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test(\"删除成功\", () => {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(json.code).to.eql(200);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-Access-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/jshERP-boot/depotHead/deleteBatch?ids={{purchaseBillId}},",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "jshERP-boot",
+                "depotHead",
+                "deleteBatch"
+              ],
+              "query": [
+                {
+                  "key": "ids",
+                  "value": "{{purchaseBillId}},"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "删除商品",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test(\"删除成功\", () => {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(json.code).to.eql(200);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-Access-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/jshERP-boot/material/deleteBatch?ids={{materialId}},",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "jshERP-boot",
+                "material",
+                "deleteBatch"
+              ],
+              "query": [
+                {
+                  "key": "ids",
+                  "value": "{{materialId}},"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "清理复核(库存回退商品清空)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "const row = json.data.rows.find(r => r.name === pm.environment.get(\"materialName\"));",
+                  "pm.test(\"商品已删除(删单库存自动回退F7)\", () => pm.expect(row).to.be.undefined);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Access-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/jshERP-boot/material/list?currentPage=1&pageSize=50",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "jshERP-boot",
+                "material",
+                "list"
+              ],
+              "query": [
+                {
+                  "key": "currentPage",
+                  "value": "1"
+                },
+                {
+                  "key": "pageSize",
+                  "value": "50"
+                }
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
