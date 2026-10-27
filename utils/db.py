@@ -25,5 +25,14 @@ class DB:
         rows = self.query(sql, args)
         return rows[0] if rows else None
 
+    def execute(self, sql, args=None):
+        """受控写:仅限清理工具的逻辑删除 UPDATE 语句(断言查询仍走 query)。"""
+        if not sql.strip().upper().startswith("UPDATE"):
+            raise ValueError("execute 仅允许 UPDATE(清理工具专用)")
+        with self.conn.cursor() as cur:
+            affected = cur.execute(sql, args)
+        self.log.info("DB! %s (%d 行)", " ".join(sql.split()), affected)
+        return affected
+
     def close(self):
         self.conn.close()

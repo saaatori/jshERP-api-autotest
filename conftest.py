@@ -50,6 +50,16 @@ def auth(cfg):
 
 
 @pytest.fixture(scope="session")
+def residue_guard(auth, db):
+    """开跑前自动清理上一轮残留(自愈):按自动化命名前缀扫描,失败仅告警。"""
+    from utils.cleanup import cleanup_residue
+    stat = cleanup_residue(auth["client"], db)
+    if any(stat.values()):
+        auth["client"].log.warning("开跑前清理残留: %s", stat)
+    return stat
+
+
+@pytest.fixture(scope="session")
 def env_check(db, auth, cfg):
     """环境准入:执行前校验开关快照与需求分析附录C一致(不符应失败提示,防环境漂移)。"""
     row = db.query_one(

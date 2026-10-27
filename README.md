@@ -34,6 +34,9 @@ DB 的 `host: auto-wsl` 会自动解析 WSL2 IP(容器 3306 仅绑定在 WSL 侧
 | testcases/test_sale/ | 销售状态迁移、库存边界两态 | regression(+db_check) |
 | testcases/test_common/ | 通用查询分页边界(yaml 矩阵) | regression |
 | testcases/test_finance/ | 财务核销/优惠/余额时点 | db_check(+regression) |
+| testcases/test_retail/ | 零售散客/会员/预付/折扣/退货 | regression(+db_check) |
+| testcases/test_depot/ | 调拨守恒/两态、其它出入库、组装 | regression(+db_check) |
+| testcases/test_report/ | 报表对账(进销存/统计/对账/首页) | db_check(+regression) |
 
 ## 框架结构
 
@@ -59,9 +62,10 @@ Jenkinsfile    gyj-api-pytest Job 入口
 2. **同账号登录互踢**:全程共用 `auth` 会话;反例用例绝不成功登录 jsh(AUTH-018 因此不做"正确密码仍可登录"步骤)。
 3. **业务失败判定**:HTTP 与 code 均可能仍为 200(REQ-API-004),断言必须落到 msgTip/具体错误码;鉴权失效只断响应体 `loginOut`(状态码 200/500 不统一,实测 getUserList 已从 200 漂移为 500)。
 4. **数据自建自清**:业务数据一律 `EXPF+随机` 动态命名,用例内 teardown 删除;DB 仅作断言读取(autocommit 必须开,否则停在旧快照读不到新数据)。
-5. **报文要点**:入库单 totalPrice/changeAmount 为负、出库单为正;info/rows 是 JSON 字符串;ids 参数带尾逗号(**batchSetStatus 的 ids 数组形式会"未知异常"**);DB 的 delete_flag 是字符串 '0';欠款(debt)不落库,是接口计算值;核销联动看 `depotHead/debtList` 的 debt(未核销余额)/finishDebt(已核销),足额核销后行从 debtList 消失;财务明细 each_amount 落库取绝对值,方向看头表 total_price 符号;`/depotHead/list` 的 search 缺 type/subType 会 code 300。
-6. **缺陷回归用例**(断言当前缺陷行为,修复后需翻转预期):BAS-002/003(供应商无唯一性/必填校验)、GOODS-020(空条码可入库)、采购数量 0/负/小数/超大与负单价全放行(PUR-004~008)、财务缺 type 触发 NPE(FIN-008)、非法 search JSON 触发 500(COM-009)。
-7. **状态机结论**(F6 实测复核):已审核单删除一律 8500011(订单与入库单无差异;早前"订单放行"系探针先反审核的误判);8500013 仅已审核可反审核;转单支持部分执行(源单 1→3→2),超量转单放行(R3)。
+5. **报文要点**:入库单 totalPrice/changeAmount 为负、出库单为正;info/rows 是 JSON 字符串;ids 参数带尾逗号(**batchSetStatus 的 ids 数组形式会"未知异常"**);DB 的 delete_flag 是字符串 '0';欠款(debt)不落库,是接口计算值;核销联动看 `depotHead/debtList` 的 debt(未核销余额)/finishDebt(已核销),足额核销后行从 debtList 消失;财务明细 each_amount 落库取绝对值,方向看头表 total_price 符号;`/depotHead/list` 的 search 缺 type/subType 会 code 300;**报表接口是 GET 平铺参数(不用 search JSON)**,getInOutStock 行 thisSum=结存/inSum=累计入/outSum=累计出,findInOutDetail 缺 remark 参数报 500;调拨的调入仓 anotherDepotId 在明细行;会员预存走"收预付款"财务单,advance_in 实时增减。
+6. **缺陷回归用例**(断言当前缺陷行为,修复后需翻转预期):BAS-002/003(供应商无唯一性/必填校验)、GOODS-020(空条码可入库)、采购数量 0/负/小数/超大与负单价全放行(PUR-004~008)、财务缺 type 触发 NPE(FIN-008)、非法 search JSON 触发 500(COM-009)、findBySelect_* 缺参"未知异常"、batchSetAdvanceIn 直接设值被实时重算覆盖(DEF-EXP-01)。
+7. **状态机结论**(F6 实测复核):已审核单删除一律 8500011(订单与入库单无差异);8500013 仅已审核可反审核;转单支持部分执行(源单 1→3→2),超量转单放行(R3)。
+8. **残留自愈**:conftest 的 residue_guard 每轮开跑前按自动化命名特征清上一轮残留(EXPF 前缀+单据前缀),工具 `python -m utils.cleanup` 可独立运行;匹配不到名称的行一律跳过(宁漏勿误删,2026-10-27 误删事故教训)。
 
 ## 已知遗留
 
