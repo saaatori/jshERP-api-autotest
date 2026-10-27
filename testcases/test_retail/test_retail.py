@@ -197,3 +197,25 @@ class TestRetail:
             s["db"].query_one("SELECT link_number FROM jsh_depot_head WHERE id=%s",
                               (detail["id"],))["link_number"] == src_no, "退货应关联原单"
         assert s["stock"]() == before + 1, f"退货后库存应回补+1,实际 {s['stock']()}"
+
+    @allure.title("API-RET-009 零售超量退货放行:出3退5(实测无累计校验,db_check)")
+    @pytest.mark.db_check
+    def test_009_over_return(self, retail_env):
+        s = retail_env
+        src_no = s["retail_out"](3, 20)
+        item_id = s["bill"].item_list(s["bill_ids"][-1]).json()["data"]["rows"][0]["id"]
+        before = s["stock"]()
+        no = "LSTK" + s["bill"].build_number()
+        info = {"operTime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "number": no,
+                "type": "入库", "subType": "零售退货", "organId": "",
+                "accountId": s["account_id"], "changeAmount": -100,
+                "discountLastMoney": 100, "totalPrice": -100,
+                "linkNumber": src_no, "payType": "现付", "status": "0"}
+        rows = [{"materialId": s["material_id"], "barCode": s["bar_code"],
+                 "depotId": s["depot_id"], "operNumber": 5, "unitPrice": 20,
+                 "allPrice": 100, "taxRate": 0, "taxMoney": 0, "taxLastMoney": 100,
+                 "unit": "个", "linkId": item_id}]
+        assert_code_ok(s["bill"].add(info, rows), "超量退货(缺陷现状:无累计校验)")
+        rr = s["bill"].get_detail_by_number(no).json()["data"]
+        s["bill_ids"].append(rr["id"])
+        assert s["stock"]() == before + 5, f"超量退货放行,库存应+5,实际 {s['stock']()}"

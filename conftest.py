@@ -49,9 +49,13 @@ def auth(cfg):
     c.session.close()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="session", autouse=True)
 def residue_guard(auth, db):
-    """开跑前自动清理上一轮残留(自愈):按自动化命名前缀扫描,失败仅告警。"""
+    """开跑前自动清理上一轮残留(自愈):按自动化命名前缀扫描,失败仅告警。
+
+    必须保持 autouse——曾因无引用导致守卫从未执行,仓库授权列表(user_business)
+    被每轮新建仓库无限追加而膨胀,最终触发仓库服务崩溃(DEF-EXP-09)。
+    """
     from utils.cleanup import cleanup_residue
     stat = cleanup_residue(auth["client"], db)
     if any(stat.values()):

@@ -167,13 +167,80 @@ class TestGoodsMore:
         返回新类别(疑似树缓存,观察项)——故 DB 落库为断言口径。"""
         s = bas_env
         cat = exp_id("EXPFcat")
+        # 实测:parent_id=1 为悬空父节点(真实根类别 id=17),树中不可见;根类别应 parentId 传空
         body = s["client"].post("/materialCategory/add", json_body={
-            "name": cat, "parentId": 1, "categoryLevel": "1", "sort": "1", "remark": ""}).json()
+            "name": cat, "parentId": "", "categoryLevel": "1", "sort": "1", "remark": ""}).json()
         assert body.get("code") == 200, f"类别新增失败: {body}"
         row = s["db"].query_one(
             "SELECT id, name, parent_id FROM jsh_material_category "
             "WHERE name=%s AND tenant_id=%s AND delete_flag=0", (cat, s["tenant_id"]))
         assert row, f"类别应落库: {cat}"
+        tree = s["client"].get("/materialCategory/getMaterialCategoryTree",
+                               params={"id": 17}).json()
+        nodes = tree if isinstance(tree, list) else tree.get("data") or []
+        titles = str(nodes)
+        assert cat in titles, f"修正父节点后类别树应含新增类别(观察项): {titles[:120]}"
         del_body = s["client"].delete("/materialCategory/deleteBatch",
                                       params={"ids": f"{row['id']},"}).json()
         assert del_body.get("code") == 200, f"删除空类别失败: {del_body}"
+
+
+@allure.feature("商品管理")
+@pytest.mark.regression
+class TestGoodsMultiUnit:
+
+    @allure.title("API-GOODS-008 多单位按箱入库:basic_number=12,库存按基本单位+12(db_check,R6)")
+    @pytest.mark.db_check
+    def test_008_multi_unit_in(self, bas_env):
+        s = bas_env
+        name = exp_id("EXPFmu")
+        barcode1, barcode2 = exp_id("EXPFmub1"), exp_id("EXPFmub2")
+        # 现成多单位 id=15:个/(箱=12个);双条码(个条码 + 箱条码)
+        assert_code_ok(s["mat"].add(name, barcode1, unit_id=15,
+                                    extra_bars=[{"bar_code": barcode2, "unit": "箱",
+                                                 "purchase": "120", "retail": "240",
+                                                 "low": "240"}]), "多单位商品")
+        row = s["mat"].find_by_name(name)
+        mid = row["id"]
+        assert_code_ok(s["depot"].add(name + "d"), "仓库")
+        depot_id = s["depot"].find_id_by_name(name + "d")
+        no = "QTRK" + s["client"].get("/sequence/buildNumber").json()["data"]["defaultNumber"]
+        info = {"operTime": "2026-10-27 12:00:00", "number": no, "type": "入库",
+                "subType": "其它", "organId": "", "accountId": "",
+                "changeAmount": 0, "discountLastMoney": 120, "totalPrice": 120, "status": "0"}
+        rows = [{"materialId": mid, "barCode": barcode2, "depotId": depot_id,
+                 "operNumber": 1, "unitPrice": 120, "allPrice": 120, "taxRate": 0,
+                 "taxMoney": 0, "taxLastMoney": 120, "unit": "箱"}]
+        assert_code_ok(s["client"].post("/depotHead/addDepotHeadAndDetail", json_body={
+            "info": __import__("json").dumps(info, ensure_ascii=False),
+            "rows": __import__("json").dumps(rows, ensure_ascii=False)}), "按箱入库1箱@120")
+        try:
+            item = s["db"].query_one(
+                "SELECT di.oper_number, di.basic_number, di.material_unit FROM jsh_depot_item di "
+                "JOIN jsh_depot_head dh ON di.header_id=dh.id "
+                "WHERE dh.number=%s AND dh.tenant_id=%s", (no, s["tenant_id"]))
+            assert (float(item["oper_number"]), float(item["basic_number"]),
+                    item["material_unit"]) == (1.0, 12.0, "箱"),                 f"箱→个换算应 oper=1/basic=12(R6): {item}"
+            stock = s["db"].query_one(
+                "SELECT current_number FROM jsh_material_current_stock "
+                "WHERE material_id=%s AND depot_id=%s AND tenant_id=%s AND delete_flag=0",
+                (mid, depot_id, s["tenant_id"]))
+            assert float(stock["current_number"]) == 12.0, f"库存按基本单位+12: {stock}"
+        finally:
+            s["mat"].delete_batch([mid])
+            s["depot"].delete_batch([depot_id])
+
+    @allure.title("API-GOODS-011 商品启停用:batchSetStatus 后列表 enabled 翻转")
+    def test_011_enable_toggle(self, bas_env):
+        s = bas_env
+        name = exp_id("EXPFtg")
+        assert_code_ok(s["mat"].add(name, exp_id("EXPFtgb")), "商品")
+        row = s["mat"].find_by_name(name)
+        body = s["client"].post("/material/batchSetStatus",
+                                json_body={"ids": f"{row['id']},", "status": "0"}).json()
+        assert body.get("code") == 200, f"停用失败: {body}"
+        row2 = s["mat"].find_by_name(name)
+        assert row2 is not None and row2.get("enabled") in (False, 0, "0"),             f"停用后 enabled 应为 False: {row2 and row2.get('enabled')}"
+        s["client"].post("/material/batchSetStatus",
+                         json_body={"ids": f"{row['id']},", "status": "1"})
+        s["mat"].delete_batch([row["id"]])

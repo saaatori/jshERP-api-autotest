@@ -182,6 +182,30 @@ class TestSaleMore:
         assert sum(float(r["operNumber"]) for r in items) == 5.0, "明细数量合计应=5"
         assert float(head["totalPrice"]) == 100.0, f"头表价税合计应=100: {head.get('totalPrice')}"
 
+    @allure.title("API-SALE-016 销售超量退货放行:出3退5(实测无累计校验,db_check)")
+    @pytest.mark.db_check
+    def test_016_over_return(self, sale_env):
+        s = sale_env
+        src_no, src_id = s["make_sale"]([{"operNumber": 3, "unitPrice": 20, "allPrice": 60,
+                                          "taxLastMoney": 60}])
+        item_id = s["bill"].item_list(src_id).json()["data"]["rows"][0]["id"]
+        stock_before = None
+        no = "XSTK" + s["bill"].build_number()
+        info = {"operTime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "number": no,
+                "type": "入库", "subType": "销售退货", "organId": s["customer_id"],
+                "accountId": s["account_id"], "changeAmount": 100,
+                "discountLastMoney": 100, "totalPrice": 100,
+                "linkNumber": src_no, "status": "0"}
+        rows = [{"materialId": s["material_id"], "barCode": s["bar_code"],
+                 "depotId": s["depot_id"], "operNumber": 5, "unitPrice": 20,
+                 "allPrice": 100, "taxRate": 0, "taxMoney": 0, "taxLastMoney": 100,
+                 "unit": "个", "linkId": item_id}]
+        assert_code_ok(s["bill"].add(info, rows), "超量退货(缺陷现状:无累计校验)")
+        sr = s["bill"].get_detail_by_number(no).json()["data"]
+        s["bill_ids"].append(sr["id"])
+        link = s["db"].query_one("SELECT link_number FROM jsh_depot_head WHERE id=%s", (sr["id"],))
+        assert link["link_number"] == src_no
+
     @allure.title("API-SALE-026 税率13计算:tax_money=13/tax_last_money=113(db_check)")
     @pytest.mark.db_check
     def test_026_tax(self, sale_env):

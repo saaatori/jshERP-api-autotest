@@ -2,6 +2,7 @@
 
 管伊佳 ERP(JSH_ERP)V3.6 接口自动化框架:Python 3.11 + Requests + Pytest + Allure + logging + PyMySQL + PyYAML。
 上游交付物:《管伊佳ERP接口测试用例.xlsx》(GYJ-TC-API-001 V1.1,191 条)、Postman 冒烟集(postman/)。
+**遇到问题先查 [docs/troubleshooting.md](docs/troubleshooting.md)**(环境/报文/数据/环境级缺陷的排障手册)。
 
 ## 环境准备
 

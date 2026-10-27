@@ -4,13 +4,22 @@ class MaterialApi:
     def __init__(self, client):
         self.c = client
 
-    def add(self, name: str, bar_code: str, purchase="10", retail="20", low="20", unit="个"):
+    def add(self, name: str, bar_code: str, purchase="10", retail="20", low="20", unit="个",
+            unit_id=None, extra_bars=None):
+        """新增商品。unit_id 挂多单位;extra_bars 为附加条码行(多单位副单位,如箱条码)。"""
+        me_list = [{"id": "", "barCode": bar_code, "commodityUnit": unit, "sku": "",
+                    "purchaseDecimal": purchase, "commodityDecimal": retail,
+                    "wholesaleDecimal": "", "lowDecimal": low}]
+        for extra in extra_bars or []:
+            me_list.append({"id": "", "barCode": extra["bar_code"],
+                            "commodityUnit": extra["unit"], "sku": "",
+                            "purchaseDecimal": extra.get("purchase", ""),
+                            "commodityDecimal": extra.get("retail", ""),
+                            "wholesaleDecimal": "", "lowDecimal": extra.get("low", "")})
         return self.c.post("/material/add", json_body={
             "name": name, "unit": unit, "mnemonic": "EXPFsp", "imgName": "",
-            "meList": [{"id": "", "barCode": bar_code, "commodityUnit": unit, "sku": "",
-                        "purchaseDecimal": purchase, "commodityDecimal": retail,
-                        "wholesaleDecimal": "", "lowDecimal": low}],
-            "stock": [], "sortList": [], "unitId": "", "meDeleteIdList": []})
+            "meList": me_list,
+            "stock": [], "sortList": [], "unitId": unit_id or "", "meDeleteIdList": []})
 
     def list(self, page: int = 1, size: int = 50):
         return self.c.get("/material/list", params={"currentPage": page, "pageSize": size})

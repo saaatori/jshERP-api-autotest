@@ -86,7 +86,7 @@ class TestReport:
     @pytest.mark.db_check
     def test_001_in_out_stock_formula(self, report_env):
         s = report_env
-        row = _stock_row(s, s["rpt"].in_out_stock(material_param=s["material_name"]))
+        row = _stock_row(s, s["rpt"].in_out_stock(material_param=s["material_name"], depot_ids=str(s["depot_id"])))
         assert (float(row["inSum"]), float(row["outSum"]), float(row["thisSum"])) == (3.0, 2.0, 1.0), \
             f"入3出2结存1,实际 in={row.get('inSum')} out={row.get('outSum')} this={row.get('thisSum')}"
 
@@ -232,7 +232,7 @@ class TestReport:
     @pytest.mark.db_check
     def test_011b_list_with_stock(self, report_env):
         s = report_env
-        data = s["rpt"].list_with_stock(material_param=s["material_name"])
+        data = s["rpt"].list_with_stock(material_param=s["material_name"], depot_ids=str(s["depot_id"]))
         rows = [r for r in (data.get("rows") or []) if r.get("barCode") == s["bar_code"]]
         assert rows or data.get("total", 0) >= 1, \
             f"按名过滤库存查询应含新建商品: total={data.get('total')}"
@@ -241,7 +241,7 @@ class TestReport:
     @pytest.mark.db_check
     def test_012b_flow_vs_stock(self, report_env):
         s = report_env
-        row = _stock_row(s, s["rpt"].in_out_stock(material_param=s["material_name"]))
+        row = _stock_row(s, s["rpt"].in_out_stock(material_param=s["material_name"], depot_ids=str(s["depot_id"])))
         stock = s["db"].query_one(
             "SELECT current_number FROM jsh_material_current_stock "
             "WHERE material_id=%s AND depot_id=%s AND tenant_id=%s AND delete_flag=0",
