@@ -206,6 +206,40 @@ class TestSaleMore:
         link = s["db"].query_one("SELECT link_number FROM jsh_depot_head WHERE id=%s", (sr["id"],))
         assert link["link_number"] == src_no
 
+    @allure.title("API-SALE-015/017 销售退货转单:库存回补+link 关联+应收联动(db_check)")
+    @pytest.mark.db_check
+    def test_015_017_sale_return(self, sale_env):
+        s = sale_env
+        src_no, src_id = s["make_sale"]([{"operNumber": 3, "unitPrice": 20, "allPrice": 60,
+                                          "taxLastMoney": 60}])
+        item_id = s["bill"].item_list(src_id).json()["data"]["rows"][0]["id"]
+        import pymysql
+        stock_before = float(s["db"].query_one(
+            "SELECT current_number FROM jsh_material_current_stock "
+            "WHERE material_id=%s AND depot_id=%s AND tenant_id=%s AND delete_flag=0",
+            (s["material_id"], s["depot_id"], s["tenant_id"]))["current_number"])
+        no = "XSTK" + s["bill"].build_number()
+        info = {"operTime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "number": no,
+                "type": "入库", "subType": "销售退货", "organId": s["customer_id"],
+                "accountId": s["account_id"], "changeAmount": -40,
+                "discountLastMoney": 40, "totalPrice": -40,
+                "linkNumber": src_no, "status": "0"}
+        rows = [{"materialId": s["material_id"], "barCode": s["bar_code"],
+                 "depotId": s["depot_id"], "operNumber": 2, "unitPrice": 20,
+                 "allPrice": 40, "taxRate": 0, "taxMoney": 0, "taxLastMoney": 40,
+                 "unit": "个", "linkId": item_id}]
+        assert_code_ok(s["bill"].add(info, rows), "销售退货转单")
+        sr = s["bill"].get_detail_by_number(no).json()["data"]
+        s["bill_ids"].append(sr["id"])
+        link = s["db"].query_one(
+            "SELECT link_number FROM jsh_depot_head WHERE id=%s", (sr["id"],))["link_number"]
+        assert link == src_no, f"退货应关联原出库单: {link}"
+        stock_after = float(s["db"].query_one(
+            "SELECT current_number FROM jsh_material_current_stock "
+            "WHERE material_id=%s AND depot_id=%s AND tenant_id=%s AND delete_flag=0",
+            (s["material_id"], s["depot_id"], s["tenant_id"]))["current_number"])
+        assert stock_after == stock_before + 2,             f"退货后库存应回补+2: {stock_before}→{stock_after}"
+
     @allure.title("API-SALE-026 税率13计算:tax_money=13/tax_last_money=113(db_check)")
     @pytest.mark.db_check
     def test_026_tax(self, sale_env):

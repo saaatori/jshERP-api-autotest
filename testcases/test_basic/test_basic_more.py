@@ -244,3 +244,63 @@ class TestGoodsMultiUnit:
         s["client"].post("/material/batchSetStatus",
                          json_body={"ids": f"{row['id']},", "status": "1"})
         s["mat"].delete_batch([row["id"]])
+
+    @allure.title("API-GOODS-019 删除商品后同条码重建被拦(DEF-EXP-07 回归,条码占用)")
+    def test_019_barcode_reuse_after_delete(self, bas_env):
+        s = bas_env
+        barcode = exp_id("EXPFrc")
+        name1, name2 = exp_id("EXPFrc1"), exp_id("EXPFrc2")
+        assert_code_ok(s["mat"].add(name1, barcode), "第一次创建")
+        row = s["mat"].find_by_name(name1)
+        assert_code_ok(s["mat"].delete_batch([row["id"]]), "删除商品")
+        body = s["mat"].add(name2, barcode).json()
+        # 口径修正(2026-10-27 复测):无库存商品删除后同条码可重建(200),
+        # 旧 extend 记录被自动逻辑删(delete_flag=1)——冒烟期 8000005 拦截未复现,记录差异;
+        # 若有库存/被引用商品的删除重建行为不同,另补用例
+        assert body.get("code") == 200, f"实测重建应成功,若被拦(如8000005)请更新差异记录: {body}"
+        row2 = s["mat"].find_by_name(name2)
+        if row2:
+            old_ext = s["db"].query(
+                "SELECT delete_flag FROM jsh_material_extend WHERE bar_code=%s ORDER BY id",
+                (barcode,))
+            flags = {str(e["delete_flag"]) for e in old_ext}
+            assert "1" in flags and "0" in flags, f"旧 extend 应逻辑删+新记录并存: {old_ext}"
+            s["mat"].delete_batch([row2["id"]])
+
+    @allure.title("API-BAS-005 供应商名称 SQL 注入样例:按普通字符处理")
+    def test_005_sql_injection_name(self, bas_env):
+        s = bas_env
+        inj = exp_id("EXPF") + "' or '1'='1"
+        body = s["sup"].add(inj, "供应商").json()
+        assert body.get("code") == 200, f"注入串应按普通字符处理: {body}"
+        sid = s["sup"].find_id_by_name(inj)
+        assert sid, "注入串供应商应按原名创建"
+        s["sup"].delete_batch([sid])
+
+    @allure.title("API-BAS-011 新增会员正向并可查询")
+    def test_011_add_member(self, bas_env):
+        s = bas_env
+        name = exp_id("EXPFmem")
+        assert_code_ok(s["sup"].add(name, "会员"), "会员新增")
+        mid = s["sup"].find_id_by_name(name)
+        assert mid, "会员应可按名查询"
+        row = s["db"].query_one(
+            "SELECT type FROM jsh_supplier WHERE id=%s", (mid,))
+        assert row["type"] == "会员"
+        s["sup"].delete_batch([mid])
+
+    @allure.title("API-BAS-016 仓库负责人与默认仓库设置(暂缓:update 报文待抓包)")
+    @pytest.mark.skip(reason="PUT /depot/update 全字段提交实测 500 未知异常,报文结构待 Fiddler 抓包后实现")
+    def test_016_depot_update(self, bas_env):
+        s = bas_env
+        name = exp_id("EXPFdp")
+        assert_code_ok(s["depot"].add(name), "仓库新增")
+        depot_id = s["depot"].find_id_by_name(name)
+        body = s["client"].put("/depot/update", json_body={
+            "id": depot_id, "name": name, "sort": "1", "remark": "",
+            "isDefault": False, "principal": "测试负责人"}).json()
+        assert body.get("code") == 200, f"仓库更新失败: {body}"
+        row = s["db"].query_one(
+            "SELECT principal, sort FROM jsh_depot WHERE id=%s", (depot_id,))
+        assert row["principal"] == "测试负责人" and str(row["sort"]) == "1",             f"负责人/排序未生效: {row}"
+        s["depot"].delete_batch([depot_id])

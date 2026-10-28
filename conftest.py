@@ -34,7 +34,8 @@ def client(cfg):
 
 @pytest.fixture(scope="session")
 def auth(cfg):
-    """管理员会话(全程唯一):登录一次并注入 token;同账号重复登录会互踢,禁止再造会话。"""
+    """管理员会话(全程唯一):登录一次并注入 token;同账号重复登录会互踢,禁止再造会话。
+    挂载自动重登回调:会话偶发失效(DEF-EXP-06 注销等)时自愈,防止整轮雪崩。"""
     c = HttpClient(cfg["base_url"], cfg["timeout"], cfg["request_min_interval"])
     resp = AuthApi(c).login(cfg["admin"]["login_name"], cfg["admin"]["password"])
     body = resp.json()
@@ -43,6 +44,14 @@ def auth(cfg):
     assert data.get("msgTip") == "user can login", f"登录失败: {data}"
     token = data["token"]
     c.token = token
+
+    def _relogin():
+        r = AuthApi(c).login(cfg["admin"]["login_name"], cfg["admin"]["password"])
+        d = r.json().get("data", {})
+        assert d.get("msgTip") == "user can login", f"自动重登失败: {d}"
+        c.token = d["token"]
+
+    c.relogin_cb = _relogin
     meta = {"client": c, "token": token, "login_resp": resp,
             "tenant_id": token.split("_")[-1], "user_id": data["user"]["id"]}
     yield meta

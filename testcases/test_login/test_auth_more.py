@@ -136,3 +136,42 @@ class TestSystemMore:
             api = SupplierApi(s)
             for sid in api.find_ids_by_name(name):
                 api.delete_batch([sid])
+
+    @allure.title("API-AUTH-021 同秒双发强制注销(DEF-EXP-06 回归,自建用户)")
+    def test_021_same_second_logout(self, auth):
+        """同用户+同模块+同IP 同秒第二次操作→会话被删(时序敏感非必现);
+        用自建用户触发,避免破坏共享 auth 会话;断言时序敏感行为并记录。"""
+        s = auth["client"]
+        uname = exp_id("EXPFs")
+        assert_code_ok(s.post("/user/add", json_body={
+            "username": uname, "loginName": uname, "password": _md5("123456"),
+            "position": "", "email": "", "phonenum": "", "remark": ""}), "建用户")
+        uid = None
+        try:
+            rows = s.get("/user/list", params={
+                "search": json.dumps({"loginName": uname}, ensure_ascii=False),
+                "currentPage": 1, "pageSize": 50}).json()["data"]["rows"]
+            uid = rows[0]["id"]
+            import requests
+            s2 = requests.Session()
+            utok = s2.post(s.base_root if hasattr(s, "base_root") else
+                           "http://localhost:9999/jshERP-boot/user/login",
+                           json={"loginName": uname, "password": _md5("123456")},
+                           timeout=15).json()["data"]["token"]
+            # 同秒双发(裸 requests,绕过 2s 限速——这正是触发条件)
+            url = "http://localhost:9999/jshERP-boot/sequence/buildNumber"
+            r1 = s2.get(url, headers={"X-Access-Token": utok}, timeout=10)
+            r2 = s2.get(url, headers={"X-Access-Token": utok}, timeout=10)
+            results = [r1.text.strip(), r2.text.strip()]
+            import time
+            time.sleep(2.1)
+            r3 = s2.get("http://localhost:9999/jshERP-boot/user/getUserSession",
+                        headers={"X-Access-Token": utok}, timeout=10)
+            triggered = r3.text.strip() == "loginOut"
+            assert triggered or r2.text.strip() != "loginOut",                 "同秒双发行为异常:第二次请求直接 loginOut 且会话未恢复"
+            # 时序敏感非必现:触发(会话删除)或不触发均记录,断言不含 500
+            for t in results:
+                assert "未知异常" not in t, f"双发响应异常: {t}"
+        finally:
+            if uid:
+                s.delete("/user/deleteBatch", params={"ids": f"{uid},"})

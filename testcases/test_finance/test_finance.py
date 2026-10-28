@@ -209,3 +209,35 @@ class TestFinance:
         body = s["acc_head"].add(info, [{"eachAmount": -10}]).json()
         assert body.get("code") == 200, f"实测缺关联可建单,若变拦截/NPE请翻转: {body}"
         s["fin_ids"].append(s["acc_head"].get_detail_by_number(info["billNo"]).json()["data"]["id"])
+
+    @allure.title("API-FIN-007 付款核销供应商欠款(暂缓:断言通道待验证)")
+    @pytest.mark.skip(reason="实测 debtList 不收录采购方向欠款;getStatementAccount 未审核单不计"
+                      "(欠20后 debtMoney=0,付款后 backMoney=-20)——需审核链(建单→审核→付款→对账)"
+                      "验证,留待下批实现")
+    def test_007_payment_write_off(self, fin_env):
+        """对称 FIN-004:采购入库欠款→付款核销→供应商 debtList finishDebt 变化。"""
+        s = fin_env
+        from datetime import datetime as dt
+        no = "CGRK" + s["bill"].build_number()
+        info = {"operTime": dt.now().strftime("%Y-%m-%d %H:%M:%S"), "number": no,
+                "type": "入库", "subType": "采购", "organId": s["supplier_id"],
+                "accountId": s["account_id"], "changeAmount": -20,
+                "discountLastMoney": 20, "totalPrice": -20, "status": "0"}
+        rows = [{"materialId": s["material_id"], "barCode": s["bar_code"],
+                 "depotId": s["depot_id"], "operNumber": 1, "unitPrice": 20,
+                 "allPrice": 20, "taxRate": 0, "taxMoney": 0, "taxLastMoney": 20, "unit": "个"}]
+        assert_code_ok(s["bill"].add(info, rows), "采购入库欠20")
+        bill_id = s["bill"].get_detail_by_number(no).json()["data"]["id"]
+        s["bill_ids"].append(bill_id)
+        body = s["client"].get("/depotHead/debtList", params={
+            "search": json.dumps({"organId": s["supplier_id"]}, ensure_ascii=False),
+            "currentPage": 1, "pageSize": 50}).json()
+        hit = [r for r in (body.get("data") or {}).get("rows") or [] if r.get("number") == no]
+        assert hit and float(hit[0].get("debt") or 0) == 20.0,             f"供应商欠款应出现在 debtList: {body}"
+        s["fin_bill"]("付款", s["supplier_id"], -20,
+                      rows=[{"billNumber": no, "eachAmount": -20}])
+        body2 = s["client"].get("/depotHead/debtList", params={
+            "search": json.dumps({"organId": s["supplier_id"]}, ensure_ascii=False),
+            "currentPage": 1, "pageSize": 50}).json()
+        hit2 = [r for r in (body2.get("data") or {}).get("rows") or [] if r.get("number") == no]
+        assert hit2 == [] or float(hit2[0].get("finishDebt") or 0) == 20.0,             f"付款核销后应结清(行移除或 finishDebt=20): {hit2}"

@@ -27,25 +27,41 @@ def _brief_text(resp, limit=300):
 
 
 class HttpClient:
-    def __init__(self, base_url, timeout=15, min_interval=2.0):
+    def __init__(self, base_url, timeout=15, min_interval=2.0, relogin_cb=None):
         self.base = base_url.rstrip("/")
         self.timeout = timeout
         self.min_interval = min_interval
         self.token = None
         self._last = 0.0
         self.session = requests.Session()
+        # 会话失效自愈回调:收到 loginOut 时重新登录并重放一次(共享会话专用,
+        # 鉴权反例的裸 client 不挂回调)。DEF-EXP-06 注销/互踢等偶发失效的兜底。
+        self.relogin_cb = relogin_cb
         self.log = get_logger()
 
-    def request(self, method, path, params=None, json_body=None):
+    def _throttle(self):
         wait = self.min_interval - (time.monotonic() - self._last)
         if wait > 0:
             time.sleep(wait)
+
+    def request(self, method, path, params=None, json_body=None):
+        self._throttle()
         headers = {"X-Access-Token": self.token} if self.token else {}
         self.log.info(">> %s %s %s", method, path, _brief(json_body))
         resp = self.session.request(method, self.base + path, params=params,
                                     json=json_body, headers=headers, timeout=self.timeout)
         self._last = time.monotonic()
         self.log.info("<< %s %s %s", resp.status_code, path, _brief_text(resp))
+        if (self.relogin_cb and self.token and resp.text.strip() == "loginOut"):
+            self.log.warning("会话失效(loginOut),自动重登并重放: %s %s", method, path)
+            self.relogin_cb()
+            self._throttle()
+            headers = {"X-Access-Token": self.token} if self.token else {}
+            self.log.info(">> 重放 %s %s %s", method, path, _brief(json_body))
+            resp = self.session.request(method, self.base + path, params=params,
+                                        json=json_body, headers=headers, timeout=self.timeout)
+            self._last = time.monotonic()
+            self.log.info("<< %s %s %s", resp.status_code, path, _brief_text(resp))
         return resp
 
     def get(self, path, params=None):

@@ -13,8 +13,9 @@ import re
 
 log = logging.getLogger("jsherp")
 
-BILL_PREFIXES = ("CGRK", "XSCK", "CGDD", "XSDD", "QTRK", "LSCK", "DBCK")
-FIN_PREFIXES = ("FKD", "SKD", "YSD", "ZCD", "ZZD")
+BILL_PREFIXES = ("CGRK", "XSCK", "CGDD", "XSDD", "QTRK", "QTCK", "LSCK", "LSTK",
+                 "DBCK", "CGTK", "XSTK", "ZZ", "CX")
+FIN_PREFIXES = ("FKD", "SKD", "YSD", "ZCD", "ZZD", "SKQ")
 AUTO_NAME_RE = re.compile(r"^(EXPF|E[0-9a-f]{6})")
 
 SQL_BYID = {
@@ -24,6 +25,11 @@ SQL_BYID = {
     "supplier": "UPDATE jsh_supplier SET delete_flag=1 WHERE id=%s",
     "depot": "UPDATE jsh_depot SET delete_flag=1 WHERE id=%s",
     "account": "UPDATE jsh_account SET delete_flag=1 WHERE id=%s",
+    "unit": "UPDATE jsh_unit SET delete_flag=1 WHERE id=%s",
+    "material_category": "UPDATE jsh_material_category SET delete_flag=1 WHERE id=%s",
+    "role": "UPDATE jsh_role SET delete_flag=1 WHERE id=%s",
+    "user": "UPDATE jsh_user SET delete_flag=1 WHERE id=%s",
+    "user_business": "UPDATE jsh_user_business SET delete_flag=1 WHERE id=%s",
 }
 
 
@@ -34,7 +40,8 @@ def _sql_flag(db, table, row_id, reason):
 
 def cleanup_residue(client, db) -> dict:
     """扫描并清理残留,返回统计。失败项仅记录不抛异常(自愈尽力而为)。"""
-    stat = {"bills": 0, "fins": 0, "materials": 0, "suppliers": 0, "depots": 0, "accounts": 0}
+    stat = {"bills": 0, "fins": 0, "materials": 0, "suppliers": 0, "depots": 0, "accounts": 0,
+        "units": 0, "categories": 0, "roles": 0, "users": 0, "orphan_ubs": 0}
 
     def rows(table, sql, args):
         try:
@@ -103,6 +110,57 @@ def cleanup_residue(client, db) -> dict:
             else:
                 _sql_flag(db, table, rid, f"接口拒绝 {body.get('code')}")
                 stat[table + "s"] += 1
+
+    # 4) 多单位(初始单位 id 15/19/20 之外的全部)
+    for r0 in rows("unit", "SELECT id, name FROM jsh_unit WHERE tenant_id='63' AND delete_flag=0 "
+                          "AND id NOT IN (15,19,20)", ()):
+        body = client.delete("/unit/deleteBatch", params={"ids": f"{r0['id']},"}).json()
+        if body.get("code") == 200:
+            stat["units"] += 1
+        else:
+            _sql_flag(db, "unit", r0["id"], f"接口拒绝 {body.get('code')}")
+            stat["units"] += 1
+
+    # 5) 商品类别(EXPF)
+    for r0 in rows("category", "SELECT id FROM jsh_material_category WHERE tenant_id='63' "
+                               "AND delete_flag=0 AND name LIKE 'EXPF%'", ()):
+        body = client.delete("/materialCategory/deleteBatch", params={"ids": f"{r0['id']},"}).json()
+        if body.get("code") == 200:
+            stat["categories"] += 1
+        else:
+            _sql_flag(db, "material_category", r0["id"], f"接口拒绝 {body.get('code')}")
+            stat["categories"] += 1
+
+    # 6) 角色/用户(EXPF/E8c/E+6hex;user_business 孤儿授权——指向已删用户/角色的记录)
+    for table, name_col, sql, api, key in [
+        ("role", "name", "SELECT id, name FROM jsh_role WHERE tenant_id='63' AND delete_flag=0", "/role/deleteBatch", None),
+        ("user", "login_name", "SELECT id, login_name FROM jsh_user WHERE tenant_id='63' AND delete_flag=0", "/user/deleteBatch", None),
+    ]:
+        for r0 in rows(table, sql, ()):
+            name = str(r0.get(name_col) or "")
+            if not AUTO_NAME_RE.match(name) and not name.startswith("E8c"):
+                continue
+            body = client.delete(api, params={"ids": f"{r0['id']},"}).json()
+            if body.get("code") == 200:
+                stat[table + "s"] += 1
+            else:
+                _sql_flag(db, table, r0["id"], f"接口拒绝 {body.get('code')}")
+                stat[table + "s"] += 1
+    orphans = rows("user_business",
+                   "SELECT ub.id FROM jsh_user_business ub WHERE ub.tenant_id='63' AND ub.delete_flag=0 AND ("
+                   "(ub.type IN ('UserRole','UserDepot','UserCustomer') AND NOT EXISTS "
+                   "(SELECT 1 FROM jsh_user u WHERE u.id=ub.key_id AND u.delete_flag=0)) "
+                   "OR (ub.type='RoleFunctions' AND NOT EXISTS "
+                   "(SELECT 1 FROM jsh_role r WHERE r.id=ub.key_id AND r.delete_flag=0)))", ())
+    orphan_ids = ",".join(f"{r0['id']}," for r0 in orphans)
+    if orphan_ids:
+        body = client.delete("/userBusiness/deleteBatch", params={"ids": orphan_ids}).json()
+        if body.get("code") == 200:
+            stat["orphan_ubs"] = len(orphans)
+        else:
+            for r0 in orphans:
+                _sql_flag(db, "user_business", r0["id"], f"接口拒绝 {body.get('code')}")
+            stat["orphan_ubs"] = len(orphans)
     return stat
 
 
