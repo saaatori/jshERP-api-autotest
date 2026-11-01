@@ -194,3 +194,45 @@
 | code 500"未知异常" | 缺参 NPE:findBySelect_*/remark/ids 数组(3.5、缺陷 15) |
 | 报表全挂/空集 | 授权列表膨胀(6.1) |
 | 用例顺序跑挂、单跑过 | DB 快照(1.2)或顺序链错位(4.3) |
+
+---
+
+## 八、WSL2 环境不稳:VM 反复自动关闭(2026-10-28 事故,含修复)
+
+### 8.1 症状群(同一根因的不同表现)
+
+- 全量回归跑到中途,大量用例报 `JSONDecodeError`(响应非 JSON)或 `ConnectionError: RemoteDisconnected`;
+- `ConnectionAbortedError(10053, "你的主机中的软件中止了一个已建立的连接")`——Windows 侧掐断连接;
+- `docker ps` 显示容器 "Up 1 second"(刚被拉起);后端日志显示 Spring Boot 反复重新启动;
+- 极端时 136 个用例全军覆没(连接层直接失败,一个断言都没执行)。
+
+### 8.2 根因链
+
+1. **WSL2 VM 空闲自动关闭**:WSL 2.7 的 vmIdleTimeout——没有交互式会话时,VM 空闲约 60 秒自动关闭,
+   **容器在跑不算"活动"**。每天首次执行 `wsl` 命令时 VM 冷启动,执行间隙 VM 又关闭;
+2. VM 冷启动后两个次生问题:① MySQL 未就绪时 backend 抢先启动→连库失败→crash loop
+   (解法:等 `jsherp-mysql` healthy 后 `docker restart jsherp-backend`);② localhost 端口转发层
+   半坏损(WSL 内部通、Windows 侧 ConnectionError);
+3. **10053 错误码强烈指向杀毒/防火墙软件介入**——若安装或更新了安全软件,需排查其 WSL/虚拟网卡拦截规则。
+
+### 8.3 已落地的修复
+
+- `.wslconfig` 增加 `vmIdleTimeout=-1`(禁用空闲关闭)——本次未完全奏效,VM 仍 bounce,需结合 8.4;
+- 共享会话自愈:HttpClient 增加 `relogin_cb`,收到 loginOut 自动重登并重放一次
+  (DEF-EXP-06 注销/互踢的兜底,鉴权反例的裸 client 不受影响);
+- 报表查询显式传 depot_ids,不再依赖会随环境抖动失效的隐式默认。
+
+### 8.4 环境恢复标准流程(VM 反复关闭时按序执行)
+
+1. `wsl --shutdown` 彻底重置;
+2. **打开一个 Ubuntu 终端窗口保持不关**(交互式会话可阻止 VM 空闲关闭,即使 vmIdleTimeout 未生效);
+3. 等待容器拉起并 `jsherp-mysql/jsherp-redis` healthy → `docker restart jsherp-backend` → 等 40 秒;
+4. WSL 内部 `curl localhost:9999` 验证后端 → Windows 浏览器开 `localhost:3001` 验证转发;
+5. 两者都通后再跑 pytest;**若 VM 仍自动关闭**:检查 Windows 事件查看器、杀毒/防火墙最近变更、
+   `wsl --version` 是否有更新,必要时 `netsh winsock reset`(需重启 Windows)。
+
+### 8.5 运行纪律
+
+- 全量回归前先做 30 秒健康检查:登录接口连续 3 次 200 + 容器 Up 时间 > 5 分钟;
+- 单跑个别用例后( --clean-alluredir 会清空结果),生成报告前必须重跑全量;
+- CI(Jenkins)环境部署在 Windows 本机常驻,天然规避本问题——这也是尽快接入 CI 的理由之一。

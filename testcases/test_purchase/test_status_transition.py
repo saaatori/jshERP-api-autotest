@@ -19,6 +19,7 @@ from api.depot_head_api import DepotHeadApi
 from api.material_api import MaterialApi
 from api.supplier_api import SupplierApi
 from common.asserts import assert_code_ok
+from utils.cleanup import delete_bills_with_fallback, delete_depots_with_fallback, delete_materials_with_fallback
 from utils.dynamic import exp_id
 
 
@@ -70,15 +71,11 @@ def order_chain(auth, db):
     s["order_no"] = "CGDD" + s["bill"].build_number()
     s["order_id"] = mk_order(s["order_no"], 10)
     yield s
-    # teardown:未审核的直接删,已审核的先反审核(F6)
-    for bid in list(dict.fromkeys(s["bill_ids"])):
-        row = db.query_one("SELECT status FROM jsh_depot_head WHERE id=%s", (bid,))
-        if row and str(row["status"]) == "1":
-            s["bill"].batch_set_status("0", [bid])
-        s["bill"].delete_batch([bid])
-    mat.delete_batch([s["material_id"]])
+    # teardown:统一助手(反审核→删除→st=2/3 不可删时 SQL 兜底,F6)
+    delete_bills_with_fallback(c, db, s["bill_ids"])
+    delete_materials_with_fallback(c, db, [s["material_id"]])
     sup.delete_batch([s["supplier_id"]])
-    depot.delete_batch([s["depot_id"]])
+    delete_depots_with_fallback(c, db, [s["depot_id"]])
     acc.delete_batch([s["account_id"]])
 
 

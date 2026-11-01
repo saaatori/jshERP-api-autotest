@@ -6,9 +6,10 @@
 - batchSetLastDebt 修正欠款:ids 带尾逗号字符串可用,数组形式 500;
 - 采购退货(type=出库 subType=采购退货+linkNumber/linkId)可对未审核入库单转退;
 - 多账户场景(multi_account_flag=0)传 accountIdList 被拒 8500008,PUR-021 推迟。
-未实现:PUR-017 转单关联查询接口 getBillListByLinkNumber 缺参 500(待抓包)、
-PUR-030 超量退货边界(待实测钉断言)。
+PUR-017 已实现(2026-10-31 源码+直调定案,GYJ-MSG-001 2.7,见 TestLinkBillQuery);
+仍未实现:PUR-030 超量退货边界(待实测钉断言)。
 """
+import json
 from datetime import datetime
 
 import allure
@@ -20,6 +21,7 @@ from api.depot_head_api import DepotHeadApi
 from api.material_api import MaterialApi
 from api.supplier_api import SupplierApi
 from common.asserts import assert_code_ok
+from utils.cleanup import delete_bills_with_fallback, delete_depots_with_fallback, delete_materials_with_fallback
 from utils.dynamic import exp_id
 
 
@@ -71,16 +73,10 @@ def pur_env(auth, db):
 
     s.update({"make_bill": make_bill, "stock": stock})
     yield s
-    for bid in list(dict.fromkeys(s["bill_ids"])):
-        row = db.query_one("SELECT status FROM jsh_depot_head WHERE id=%s", (bid,))
-        if row and str(row["status"]) in ("1", "3"):
-            s["bill"].batch_set_status("0", [bid])
-        body = s["bill"].delete_batch([bid]).json()
-        if body.get("code") != 200:
-            c.log.warning("teardown 单据 %s 删除失败: %s", bid, body)
-    mat.delete_batch([s["material_id"]])
+    delete_bills_with_fallback(c, db, s["bill_ids"])
+    delete_materials_with_fallback(c, db, [s["material_id"]])
     sup.delete_batch([s["supplier_id"]])
-    depot.delete_batch([s["depot_a"], s["depot_b"]])
+    delete_depots_with_fallback(c, db, [s["depot_a"], s["depot_b"]])
     acc.delete_batch([s["account_id"]])
 
 
@@ -208,3 +204,147 @@ class TestPurchaseMore:
             "SELECT link_number FROM jsh_depot_head WHERE id=%s", (rb["id"],))["link_number"]
         assert link == src_no, f"退货应关联原入库单: {link}"
         assert s["stock"]() == before - 2, f"退货后库存应-2,实际 {s['stock']()}"
+
+
+@allure.feature("采购管理")
+@pytest.mark.regression
+class TestLinkBillQuery:
+    """转单关联查询(2026-10-31 源码+直调+DB 双查定案,GYJ-MSG-001 2.7):
+    GET /depotHead/getBillListByLinkNumber?number=源单号 → {code:200,data:[...]}。
+    **缺陷**:后端 andSubTypeLike("退货") 未加 % 通配符(SQL 精确匹配 sub_type='退货',
+    无单据满足),接口对任何单号恒返回空——前端弹窗"关联退货单"展示实际失效
+    (缺陷候选,提交禅道);修复为 '%退货%' 后翻转 test_017 断言。"""
+
+    @allure.title("API-PUR-017 转单关联查询恒返回空(缺陷回归:like 缺 % 通配符,DB 双查佐证,修复后翻转)")
+    @pytest.mark.db_check
+    def test_017_return_link_query(self, pur_env):
+        """2026-10-31 定案:建 linkNumber 关联的采购退货单后接口仍返回空——
+        后端 andSubTypeLike("退货") 未加 %,SQL 为 sub_type like '退货'(精确匹配)。
+        用 DB 同库双查证明数据存在而接口条件失效;修复后请翻转断言。"""
+        s = pur_env
+        src_no, src_id = s["make_bill"]("CGRK", "入库", "采购", num=3)
+        item_id = s["bill"].item_list(src_id).json()["data"]["rows"][0]["id"]
+        no = "CGTK" + s["bill"].build_number()
+        info = {"operTime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "number": no,
+                "type": "出库", "subType": "采购退货", "organId": s["supplier_id"],
+                "accountId": s["account_id"], "changeAmount": -10,
+                "discountLastMoney": 10, "totalPrice": -10,
+                "linkNumber": src_no, "status": "0"}
+        rows = [{"materialId": s["material_id"], "barCode": s["bar_code"], "depotId": s["depot_a"],
+                 "operNumber": 1, "unitPrice": 10, "allPrice": 10, "taxRate": 0,
+                 "taxMoney": 0, "taxLastMoney": 10, "unit": "个", "linkId": item_id}]
+        assert_code_ok(s["bill"].add(info, rows), "采购退货关联源单")
+        rb_id = s["bill"].get_detail_by_number(no).json()["data"]["id"]
+        # DB 双查佐证根因:通配命中 1 行、精确命中 0 行 → 数据在,接口 like 条件失效
+        exact = s["db"].query_one(
+            "SELECT COUNT(*) n FROM jsh_depot_head WHERE link_number=%s "
+            "AND sub_type LIKE '退货' AND delete_flag=0", (src_no,))["n"]
+        wild = s["db"].query_one(
+            "SELECT COUNT(*) n FROM jsh_depot_head WHERE link_number=%s "
+            "AND sub_type LIKE '%%退货%%' AND delete_flag=0", (src_no,))["n"]
+        assert wild == 1 and exact == 0, \
+            f"DB 应通配命中1行且精确命中0行: exact={exact}, wild={wild}"
+        body = s["client"].get("/depotHead/getBillListByLinkNumber",
+                               params={"number": src_no}).json()
+        assert body.get("code") == 200 and (body.get("data") or []) == [], \
+            f"缺陷现状应恒返回空(like 缺 %),若已修复请翻转断言: {body}"
+        assert_code_ok(s["bill"].delete_batch([rb_id]), "清理退货单")
+
+    @allure.title("API-PUR-017 语义边界:订单→入库非退货关联与不存在单号均返回空(名实不符观察项)")
+    def test_017b_non_return_empty(self, pur_env):
+        s = pur_env
+        order_no, order_id = s["make_bill"]("CGDD", "其它", "采购订单", num=2)
+        item_id = s["bill"].item_list(order_id).json()["data"]["rows"][0]["id"]
+        no = "CGRK" + s["bill"].build_number()
+        info = {"operTime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "number": no,
+                "type": "入库", "subType": "采购", "organId": s["supplier_id"],
+                "accountId": s["account_id"], "changeAmount": -20,
+                "discountLastMoney": 20, "totalPrice": -20,
+                "linkNumber": order_no, "status": "0"}
+        rows = [{"materialId": s["material_id"], "barCode": s["bar_code"], "depotId": s["depot_a"],
+                 "operNumber": 2, "unitPrice": 10, "allPrice": 20, "taxRate": 0,
+                 "taxMoney": 0, "taxLastMoney": 20, "unit": "个", "linkId": item_id}]
+        assert_code_ok(s["bill"].add(info, rows), "订单转入库(非退货关联)")
+        s["bill_ids"].append(s["bill"].get_detail_by_number(no).json()["data"]["id"])
+        body = s["client"].get("/depotHead/getBillListByLinkNumber",
+                               params={"number": order_no}).json()
+        assert body.get("code") == 200 and (body.get("data") or []) == [], \
+            f"非退货关联查源头应返回空数组(只认退货),实际: {body}"
+        body2 = s["client"].get("/depotHead/getBillListByLinkNumber",
+                                params={"number": "NOEXPFXQR"}).json()
+        assert body2.get("code") == 200 and (body2.get("data") or []) == [], \
+            f"不存在单号应返回空数组不报错: {body2}"
+
+
+@allure.feature("采购管理")
+@pytest.mark.regression
+@pytest.mark.usefixtures("env_check")
+class TestPurchaseParamEdge:
+    """参数边界补充(2026-10-31 探针取证):订单缺供应商放行(校验缺失家族),
+    空明细 8500006 有校验(正面行为),多账户分摊(flag=1)落库;报文见 GYJ-MSG-001。"""
+
+    @allure.title("API-PUR-002 订单缺供应商(organId 缺失)实测放行——缺陷回归")
+    def test_002_order_no_organ(self, pur_env):
+        s = pur_env
+        no = "CGDD" + s["bill"].build_number()
+        info = {"operTime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "number": no,
+                "type": "其它", "subType": "采购订单", "status": "0"}
+        rows = [{"materialId": s["material_id"], "barCode": s["bar_code"], "depotId": s["depot_a"],
+                 "operNumber": 1, "unitPrice": 10, "allPrice": 10, "taxRate": 0,
+                 "taxMoney": 0, "taxLastMoney": 10, "unit": "个"}]
+        assert_code_ok(s["bill"].add(info, rows), "缺供应商建单(缺陷现状)")
+        s["bill_ids"].append(s["bill"].get_detail_by_number(no).json()["data"]["id"])
+
+    @allure.title("API-PUR-003 订单明细为空提交被拒(8500006,正面校验)")
+    def test_003_empty_rows(self, pur_env):
+        s = pur_env
+        no = "CGDD" + s["bill"].build_number()
+        info = {"operTime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "number": no,
+                "type": "其它", "subType": "采购订单", "organId": s["supplier_id"], "status": "0"}
+        body = s["bill"].add(info, []).json()
+        assert body.get("code") == 8500006, f"空明细应被 8500006 拦截,实际: {body}"
+
+    @allure.title("API-PUR-021 多账户付款:两账户分摊 12/8 落库(余额不动,F9/db_check)")
+    @pytest.mark.db_check
+    def test_021_multi_account(self, pur_env):
+        """2026-10-31 探针:multiAccountFlag=1 时 info.accountIdList/accountMoneyList
+        传紧凑 JSON 数组字符串("[12,8]",禁带空格否则 getArrSum NPE 500);
+        金额和绝对值必须等于 changeAmount 绝对值(8500008);未审核单不动账户余额(F9)。"""
+        from api.account_api import AccountApi
+        from api.system_config_api import SystemConfigApi
+        s = pur_env
+        syscfg = SystemConfigApi(s["client"])
+        flag_before = syscfg.get_current_info().get("multiAccountFlag")
+        a1, a2 = exp_id("EXPFa"), exp_id("EXPFa")
+        acc_ids = []
+        try:
+            syscfg.update_field("multiAccountFlag", "1")
+            for an in (a1, a2):
+                assert_code_ok(AccountApi(s["client"]).add(an, initial=100), "账户")
+                acc_ids.append(s["db"].query_one(
+                    "SELECT id FROM jsh_account WHERE name=%s AND delete_flag=0", (an,))["id"])
+            no = "CGRK" + s["bill"].build_number()
+            info = {"operTime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "number": no,
+                    "type": "入库", "subType": "采购", "organId": s["supplier_id"],
+                    "accountIdList": json.dumps(acc_ids), "accountMoneyList": "[12,8]",
+                    "changeAmount": -20, "discountLastMoney": 20, "totalPrice": -20, "status": "0"}
+            rows = [{"materialId": s["material_id"], "barCode": s["bar_code"], "depotId": s["depot_a"],
+                     "operNumber": 2, "unitPrice": 10, "allPrice": 20, "taxRate": 0,
+                     "taxMoney": 0, "taxLastMoney": 20, "unit": "个"}]
+            assert_code_ok(s["bill"].add(info, rows), "多账户入库")
+            head = s["db"].query_one(
+                "SELECT account_id_list, account_money_list FROM jsh_depot_head WHERE number=%s AND delete_flag=0",
+                (no,))
+            assert head and head["account_money_list"] == "12,8", f"分摊金额应落库: {head}"
+            for aid in acc_ids:
+                assert str(aid) in (head["account_id_list"] or ""), f"账户 {aid} 应在 account_id_list: {head}"
+            s["bill_ids"].append(s["db"].query_one(
+                "SELECT id FROM jsh_depot_head WHERE number=%s AND delete_flag=0", (no,))["id"])
+        finally:
+            if flag_before is not None:
+                syscfg.update_field("multiAccountFlag", flag_before)
+            for an in (a1, a2):
+                row = s["db"].query_one(
+                    "SELECT id FROM jsh_account WHERE name=%s AND delete_flag=0", (an,))
+                if row:
+                    s["client"].delete("/account/deleteBatch", params={"ids": f"{row['id']},"})

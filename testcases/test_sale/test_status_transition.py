@@ -14,6 +14,7 @@ from api.depot_head_api import DepotHeadApi
 from api.material_api import MaterialApi
 from api.supplier_api import SupplierApi
 from common.asserts import assert_code_ok
+from utils.cleanup import delete_bills_with_fallback, delete_depots_with_fallback, delete_materials_with_fallback
 from utils.dynamic import exp_id
 
 
@@ -70,15 +71,13 @@ def sale_chain(auth, db):
     s.update({"mk_sale_order": mk_sale_order, "mk_out": mk_out, "stock_now": stock_now})
     s["order_no"] = "XSDD" + s["bill"].build_number()
     s["order_id"] = mk_sale_order(s["order_no"], 10)
+    s["bill_ids"].append(s["order_id"])
     yield s
-    for bid in list(dict.fromkeys(s["bill_ids"])):
-        row = db.query_one("SELECT status FROM jsh_depot_head WHERE id=%s", (bid,))
-        if row and str(row["status"]) == "1":
-            s["bill"].batch_set_status("0", [bid])
-        s["bill"].delete_batch([bid])
-    mat.delete_batch([s["material_id"]])
+    # teardown:统一助手(此前未跟踪任何单据导致整链残留,2026-10-31 修复)
+    delete_bills_with_fallback(c, db, s["bill_ids"])
+    delete_materials_with_fallback(c, db, [s["material_id"]])
     sup.delete_batch([s["customer_id"]])
-    depot.delete_batch([s["depot_id"]])
+    delete_depots_with_fallback(c, db, [s["depot_id"]])
     acc.delete_batch([s["account_id"]])
 
 
@@ -112,6 +111,7 @@ class TestSaleTransition:
         item_id = s["bill"].item_list(s["order_id"]).json()["data"]["rows"][0]["id"]
         no = "XSCK" + s["bill"].build_number()
         s["out_partial"] = s["mk_out"](no, 6, link_no=s["order_no"], link_item=item_id)
+        s["bill_ids"].append(s["out_partial"])
         assert _status(s, s["order_id"]) == "3", "部分转出库后源单应为 3"
         row = db.query_one("SELECT link_number FROM jsh_depot_head WHERE id=%s", (s["out_partial"],))
         assert row["link_number"] == s["order_no"], f"link_number 关联异常: {row}"
@@ -132,6 +132,7 @@ class TestSaleTransition:
         s = sale_chain
         extra_no = "XSDD" + s["bill"].build_number()
         extra_id = s["mk_sale_order"](extra_no, 1)
+        s["bill_ids"].append(extra_id)
         s["bill"].batch_set_status("1", [extra_id])
         body = s["bill"].delete_batch([extra_id]).json()
         assert body.get("code") == 8500011, f"期望 8500011,实际: {body}"

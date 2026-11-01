@@ -5,9 +5,10 @@
   删除充值单实时回退 0(R5/DEF-EXP-01:期初手工值被重算覆盖);预存不足被 8500016 拦截;
 - 折扣三件套 discount/discountMoney/discountLastMoney 与 totalPrice 落库一致;
 - 零售退货 type=入库 subType=零售退货,linkNumber 关联原单,库存回补。
-未实现(阻塞/推迟):RET-004 结算方式选项查询(findBySelect_retail 缺参 NPE)、
-RET-006 多账户(multi_account_flag=0)、RET-009 超量退货(待实测钉断言)。
+未实现(阻塞/推迟):RET-006 多账户(multi_account_flag=0)、RET-009 已实现(超量退货实测)。
+RET-004 已于 2026-10-31 抓包解锁(GYJ-MSG-001 2.2,见 test_004)。
 """
+import json
 from datetime import datetime
 
 import allure
@@ -20,6 +21,7 @@ from api.depot_head_api import DepotHeadApi
 from api.material_api import MaterialApi
 from api.supplier_api import SupplierApi
 from common.asserts import assert_code_ok
+from utils.cleanup import delete_depots_with_fallback
 from utils.dynamic import exp_id
 
 
@@ -108,7 +110,7 @@ def retail_env(auth, db):
     body = sup.delete_batch([s["member_id"]]).json()
     if body.get("code") != 200:
         c.log.warning("teardown 会员删除失败: %s", body)
-    depot.delete_batch([s["depot_id"]])
+    delete_depots_with_fallback(c, db, [s["depot_id"]])
     acc.delete_batch([s["account_id"]])
 
 
@@ -145,6 +147,24 @@ class TestRetail:
         s["retail_out"](1, 20, organ_id=s["member_id"], pay_type="预付款")
         assert s["advance_in"]() == 480.0, \
             f"预付消费 20 后应 480(实时重算 R5),实际 {s['advance_in']()}"
+
+    @allure.title("API-RET-004 结算方式查询:findBySelect_retail 行含 advanceIn 且与 DB 同源(db_check)")
+    @pytest.mark.db_check
+    def test_004_settlement_options(self, retail_env):
+        """2026-10-31 抓包解锁(GYJ-MSG-001 2.2):页面统一 POST {"limit":1};
+        advanceIn=jsh_supplier.advance_in 实时重算值(R5)。基线会员 60(演示库初始数据,
+        需求分析 2.4/附录C)实测稳定出现在下拉中;下拉过滤语义未明,故以基线会员断言。"""
+        s = retail_env
+        rows = s["client"].post("/supplier/findBySelect_retail",
+                                json_body={"limit": 1}).json()
+        assert isinstance(rows, list) and rows, "会员下拉应返回非空裸数组"
+        assert all("advanceIn" in r for r in rows), f"会员行应含 advanceIn: {rows[:2]}"
+        hit = next((r for r in rows if r["id"] == 60), None)
+        assert hit, f"基线会员60 应出现在下拉中: {rows[:3]}"
+        db_val = s["db"].query_one(
+            "SELECT advance_in FROM jsh_supplier WHERE id=60 AND delete_flag=0")["advance_in"]
+        assert float(hit["advanceIn"]) == float(db_val), \
+            f"接口 advanceIn({hit['advanceIn']}) 应与 DB({db_val}) 同源一致"
 
     @allure.title("API-RET-005 零售折扣三件套落库:discount=10/money=10/last=90(db_check)")
     @pytest.mark.db_check
@@ -219,3 +239,46 @@ class TestRetail:
         rr = s["bill"].get_detail_by_number(no).json()["data"]
         s["bill_ids"].append(rr["id"])
         assert s["stock"]() == before + 5, f"超量退货放行,库存应+5,实际 {s['stock']()}"
+
+    @allure.title("API-RET-006 零售多账户结算:两账户分摊 15/25 落库(flag=1,db_check)")
+    @pytest.mark.db_check
+    def test_006_multi_account(self, retail_env):
+        """与 PUR-021 对称走同一 addDepotHeadAndDetail 服务;紧凑数组字符串禁带空格。"""
+        from api.account_api import AccountApi
+        from api.system_config_api import SystemConfigApi
+        s = retail_env
+        syscfg = SystemConfigApi(s["client"])
+        flag_before = syscfg.get_current_info().get("multiAccountFlag")
+        a1, a2 = exp_id("EXPFa"), exp_id("EXPFa")
+        acc_ids = []
+        try:
+            syscfg.update_field("multiAccountFlag", "1")
+            for an in (a1, a2):
+                assert_code_ok(AccountApi(s["client"]).add(an, initial=100), "账户")
+                acc_ids.append(s["db"].query_one(
+                    "SELECT id FROM jsh_account WHERE name=%s AND delete_flag=0", (an,))["id"])
+            no = "LSCK" + s["bill"].build_number()
+            info = {"operTime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "number": no,
+                    "type": "出库", "subType": "零售", "organId": s["member_id"],
+                    "accountIdList": json.dumps(acc_ids), "accountMoneyList": "[15,25]",
+                    "changeAmount": 40, "discountLastMoney": 40, "totalPrice": 40,
+                    "payType": "现付", "status": "0"}
+            rows = [{"materialId": s["material_id"], "barCode": s["bar_code"], "depotId": s["depot_id"],
+                     "operNumber": 2, "unitPrice": 20, "allPrice": 40, "taxRate": 0,
+                     "taxMoney": 0, "taxLastMoney": 40, "unit": "个"}]
+            assert_code_ok(s["bill"].add(info, rows), "多账户零售")
+            head = s["db"].query_one(
+                "SELECT account_money_list FROM jsh_depot_head WHERE number=%s AND delete_flag=0",
+                (no,))
+            assert head and head["account_money_list"] == "15,25", f"分摊金额应落库: {head}"
+            s["bill_ids"].append(s["db"].query_one(
+                "SELECT id FROM jsh_depot_head WHERE number=%s AND delete_flag=0", (no,))["id"])
+        finally:
+            if flag_before is not None:
+                syscfg.update_field("multiAccountFlag", flag_before)
+            for an in (a1, a2):
+                row = s["db"].query_one(
+                    "SELECT id FROM jsh_account WHERE name=%s AND delete_flag=0", (an,))
+                if row:
+                    s["client"].delete("/account/deleteBatch", params={"ids": f"{row['id']},"})
+

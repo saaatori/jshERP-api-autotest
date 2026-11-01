@@ -22,6 +22,7 @@ from api.depot_head_api import DepotHeadApi
 from api.material_api import MaterialApi
 from api.supplier_api import SupplierApi
 from common.asserts import assert_code_ok
+from utils.cleanup import delete_bills_with_fallback, delete_depots_with_fallback, delete_materials_with_fallback
 from utils.dynamic import exp_id
 
 log = logging.getLogger("jsherp")
@@ -75,27 +76,22 @@ def fin_env(auth, db):
 
     s.update({"sale_out": sale_out, "fin_bill": fin_bill})
     yield s
-    # teardown:财务单(先反审核)→业务单→资料;删除失败记录不中断
+    # teardown:财务单(先反审核,失败 SQL 兜底)→业务单(统一助手)→资料
     for fid in s["fin_ids"]:
         row = db.query_one("SELECT status FROM jsh_account_head WHERE id=%s", (fid,))
         if row and str(row["status"]) == "1":
             s["acc_head"].batch_set_status("0", [fid])
         body = s["acc_head"].delete_batch([fid]).json()
         if body.get("code") != 200:
-            log.warning("teardown 财务单 %s 删除失败: %s", fid, body)
-    for bid in s["bill_ids"]:
-        row = db.query_one("SELECT status FROM jsh_depot_head WHERE id=%s", (bid,))
-        if row and str(row["status"]) == "1":
-            s["bill"].batch_set_status("0", [bid])
-        body = s["bill"].delete_batch([bid]).json()
-        if body.get("code") != 200:
-            log.warning("teardown 单据 %s 删除失败: %s", bid, body)
-    mat.delete_batch([s["material_id"]])
+            log.warning("teardown 财务单 %s 删除失败,SQL 兜底: %s", fid, body)
+            db.execute("UPDATE jsh_account_head SET delete_flag=1 WHERE id=%s", (fid,))
+    delete_bills_with_fallback(s["client"], db, s["bill_ids"])
+    delete_materials_with_fallback(s["client"], db, [s["material_id"]])
     for name in (s["customer_id"], s["supplier_id"]):
         body = sup.delete_batch([name]).json()
         if body.get("code") != 200:
             log.warning("teardown 往来 %s 删除失败(可能仍有依赖): %s", name, body)
-    depot.delete_batch([s["depot_id"]])
+    delete_depots_with_fallback(s["client"], db, [s["depot_id"]])
     acc.delete_batch([s["account_id"]])
 
 

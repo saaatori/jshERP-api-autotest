@@ -15,6 +15,7 @@ from api.depot_head_api import DepotHeadApi
 from api.material_api import MaterialApi
 from api.supplier_api import SupplierApi
 from common.asserts import assert_code_ok
+from utils.cleanup import delete_bills_with_fallback, delete_depots_with_fallback
 from utils.dynamic import exp_id
 
 
@@ -23,7 +24,7 @@ def _now():
 
 
 @pytest.fixture(scope="class")
-def smoke_chain(auth):
+def smoke_chain(auth, db):
     """链路数据自建自清(类级一次);失败中断时已建数据留待按 EXPF 前缀人工清理。"""
     c = auth["client"]
     stamp = exp_id()
@@ -52,12 +53,10 @@ def smoke_chain(auth):
     assert not missing, f"基础资料提取 ID 失败: {missing}"
     yield s
     # teardown:删单→商品→往来→仓库→账户(删除即重算回退,F7)
-    for bid in s["bill_ids"]:
-        resp = s["bill"].delete_batch([bid])
-        c.log.info("清理单据 %s -> code=%s", bid, resp.json().get("code"))
+    delete_bills_with_fallback(c, db, s["bill_ids"])
     s["mat"].delete_batch([s["material_id"]])
     s["sup"].delete_batch([s["supplier_id"], s["customer_id"]])
-    s["depot"].delete_batch([s["depot_id"]])
+    delete_depots_with_fallback(c, db, [s["depot_id"]])
     s["acc"].delete_batch([s["account_id"]])
     assert s["mat"].find_by_name(s["material_name"]) is None, "清理复核:商品未删除"
 

@@ -66,7 +66,7 @@ def residue_guard(auth, db):
     被每轮新建仓库无限追加而膨胀,最终触发仓库服务崩溃(DEF-EXP-09)。
     """
     from utils.cleanup import cleanup_residue
-    stat = cleanup_residue(auth["client"], db)
+    stat = cleanup_residue(auth["client"], db, auth["tenant_id"])
     if any(stat.values()):
         auth["client"].log.warning("开跑前清理残留: %s", stat)
     return stat

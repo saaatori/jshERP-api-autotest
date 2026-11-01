@@ -15,6 +15,7 @@ from api.material_api import MaterialApi
 from api.supplier_api import SupplierApi
 from api.system_config_api import SystemConfigApi
 from common.asserts import assert_code_ok
+from utils.cleanup import delete_depots_with_fallback
 from utils.dynamic import exp_id
 
 
@@ -72,7 +73,7 @@ def stock_env(auth, db):
             s["bill"].delete_batch([bid])
         mat.delete_batch([s["material_id"]])
         sup.delete_batch([s["customer_id"]])
-        depot.delete_batch([s["depot_id"]])
+        delete_depots_with_fallback(c, db, [s["depot_id"]])
         acc.delete_batch([s["account_id"]])
 
 

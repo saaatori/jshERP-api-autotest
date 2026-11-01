@@ -20,6 +20,7 @@ from api.material_api import MaterialApi
 from api.supplier_api import SupplierApi
 from api.system_config_api import SystemConfigApi
 from common.asserts import assert_code_ok
+from utils.cleanup import delete_depots_with_fallback
 from utils.dynamic import exp_id
 
 
@@ -84,7 +85,7 @@ def depot_env(auth, db):
             if body.get("code") != 200:
                 c.log.warning("teardown 单据 %s 删除失败: %s", bid, body)
         mat.delete_batch([s["material_id"]])
-        depot.delete_batch([s["depot_a"], s["depot_b"]])
+        delete_depots_with_fallback(c, db, [s["depot_a"], s["depot_b"]])
         acc.delete_batch([s["account_id"]])
 
 

@@ -7,6 +7,7 @@
 - findInOutDetail 缺 remark 参数报 500(缺参未知异常缺陷同源模式)。
 RPT-003 多单位口径推迟(多单位商品构造复杂,批次 I)。
 """
+import json
 from datetime import datetime
 
 import allure
@@ -19,6 +20,7 @@ from api.material_api import MaterialApi
 from api.report_api import ReportApi
 from api.supplier_api import SupplierApi
 from common.asserts import assert_code_ok
+from utils.cleanup import delete_bills_with_fallback, delete_depots_with_fallback
 from utils.dynamic import exp_id
 
 
@@ -64,11 +66,10 @@ def report_env(auth, db):
     make_bill("XSCK", "出库", "销售", s["customer_id"], 1, 20)
     make_bill("LSCK", "出库", "零售", "", 1, 20)
     yield s
-    for bid in s["bill_ids"]:
-        s["bill"].delete_batch([bid])
+    delete_bills_with_fallback(c, db, s["bill_ids"])
     mat.delete_batch([s["material_id"]])
     sup.delete_batch([s["supplier_id"], s["customer_id"]])
-    depot.delete_batch([s["depot_id"]])
+    delete_depots_with_fallback(c, db, [s["depot_id"]])
     acc.delete_batch([s["account_id"]])
 
 
@@ -248,3 +249,38 @@ class TestReport:
             (s["material_id"], s["depot_id"], s["tenant_id"]))
         assert float(row["thisSum"]) == float(stock["current_number"]), \
             f"流水重算结存 {row['thisSum']} 应=DB库存 {stock['current_number']}"
+
+    @allure.title("API-RPT-003 多单位商品按基本单位统计(thisSum=24,db_check,R6)")
+    @pytest.mark.db_check
+    def test_003_multi_unit_stat(self, report_env):
+        """多单位商品(unitId=15,个/箱=12)按箱入库 2 箱 → getInOutStock 的 thisSum
+        应为 24(基本单位口径,R6);报表必须显式传 depotIds(DEF-EXP-09)。"""
+        s = report_env
+        from utils.dynamic import exp_id as _e
+        name, bar1, bar2 = _e("EXPFr3m"), _e("EXPFr3b1"), _e("EXPFr3b2")
+        assert_code_ok(s["mat"].add(name, bar1, unit_id=15,
+                                    extra_bars=[{"bar_code": bar2, "unit": "箱",
+                                                 "purchase": "120", "retail": "240",
+                                                 "low": "240"}]), "多单位商品")
+        mid = s["mat"].find_by_name(name)["id"]
+        no = "QTRK" + s["bill"].build_number()
+        info = {"operTime": "2026-10-31 12:00:00", "number": no, "type": "入库",
+                "subType": "其它", "organId": "", "accountId": "",
+                "changeAmount": 0, "discountLastMoney": 240, "totalPrice": 240, "status": "0"}
+        rows = [{"materialId": mid, "barCode": bar2, "depotId": s["depot_id"],
+                 "operNumber": 2, "unitPrice": 120, "allPrice": 240, "taxRate": 0,
+                 "taxMoney": 0, "taxLastMoney": 240, "unit": "箱"}]
+        assert_code_ok(s["client"].post("/depotHead/addDepotHeadAndDetail", json_body={
+            "info": json.dumps(info, ensure_ascii=False),
+            "rows": json.dumps(rows, ensure_ascii=False)}), "按箱入库2箱")
+        try:
+            data = s["rpt"].in_out_stock(material_param=name, depot_ids=str(s["depot_id"]))
+            rows_ = data.get("rows") or []
+            assert rows_, f"统计应含该商品: {str(data)[:150]}"
+            assert any(float(r.get("thisSum") or 0) == 24.0 for r in rows_),                 f"多单位统计应按基本单位 24(R6): {str(data)[:200]}"
+        finally:
+            hid = s["db"].query_one("SELECT id FROM jsh_depot_head WHERE number=%s", (no,))
+            if hid:
+                s["client"].delete("/depotHead/deleteBatch", params={"ids": f"{hid['id']},"})
+            s["mat"].delete_batch([mid])
+

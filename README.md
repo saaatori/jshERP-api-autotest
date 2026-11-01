@@ -1,7 +1,7 @@
 # jshERP 接口自动化(项目一·阶段三)
 
 管伊佳 ERP(JSH_ERP)V3.6 接口自动化框架:Python 3.11 + Requests + Pytest + Allure + logging + PyMySQL + PyYAML。
-上游交付物:《管伊佳ERP接口测试用例.xlsx》(GYJ-TC-API-001 V1.1,191 条)、Postman 冒烟集(postman/)。
+上游交付物:《管伊佳ERP接口测试用例.xlsx》(GYJ-TC-API-001 V1.2,191 条)、Postman 冒烟集(postman/)。
 **遇到问题先查 [docs/troubleshooting.md](docs/troubleshooting.md)**(环境/报文/数据/环境级缺陷的排障手册)。
 
 ## 环境准备
@@ -17,10 +17,10 @@ DB 的 `host: auto-wsl` 会自动解析 WSL2 IP(容器 3306 仅绑定在 WSL 侧
 ## 运行
 
 ```bash
-.venv\Scripts\python -m pytest -m smoke        # 冒烟主链路(9 条,对应 Postman 集)
+.venv\Scripts\python -m pytest -m smoke        # 冒烟套件(9 条:主链路4+登录2+供应商2+商品1)
 .venv\Scripts\python -m pytest -m regression   # 回归套件(状态迁移/参数矩阵/查询边界)
 .venv\Scripts\python -m pytest -m db_check     # 数据库对账
-.venv\Scripts\python -m pytest                 # 全量(65 条,约 10 分钟,受 2s 限速)
+.venv\Scripts\python -m pytest                 # 全量(162 条=144 个测试函数+参数化展开,约 30 分钟,受 2s 限速)
 .venv\Scripts\allure serve reports\allure-results   # 查看报告(需本机安装 Allure CLI)
 ```
 
@@ -38,16 +38,17 @@ DB 的 `host: auto-wsl` 会自动解析 WSL2 IP(容器 3306 仅绑定在 WSL 侧
 | testcases/test_retail/ | 零售散客/会员/预付/折扣/退货 | regression(+db_check) |
 | testcases/test_depot/ | 调拨守恒/两态、其它出入库、组装 | regression(+db_check) |
 | testcases/test_report/ | 报表对账(进销存/统计/对账/首页) | db_check(+regression) |
+| testcases/test_permission/ | 系统权限(角色/数据权限/接口越权) | permission |
 
 ## 框架结构
 
 ```text
 config/        env.yaml(基线)+ env.local.yaml(敏感,不入 Git)
 common/        config.py(合并加载)、client.py(X-Access-Token/限速/日志)、asserts.py(分层断言)、dataloader.py(yaml 用例加载)
-api/           auth/supplier/material/depot/account/depot_head 六组接口封装
-data/          yaml 用例数据(login_negative 登录矩阵、purchase_param_matrix 采购参数矩阵),加用例=加行
-utils/         db.py(MySQL 只读)、logger.py、dynamic.py(EXPF 动态数据)
-testcases/     smoke/ 冒烟链路;test_login/ 鉴权;test_basic/ 基础资料;test_purchase/ 采购矩阵
+api/           auth/supplier/material/depot/account/depot_head/account_head/report/system_config 九组接口封装
+data/          yaml 用例数据(login_negative 登录矩阵、purchase_param_matrix 采购参数矩阵、com_query_boundary 查询分页边界),加用例=加行
+utils/         db.py(MySQL 只读+清理白名单写)、logger.py、dynamic.py(EXPF 动态数据)、cleanup.py(残留清理,residue_guard 复用,可独立运行)
+testcases/     smoke/ 冒烟链路;test_login/ 鉴权;test_basic/ 基础资料;test_purchase/ 采购;test_sale/ 销售;test_retail/ 零售;test_depot/ 仓库;test_finance/ 财务;test_report/ 报表;test_permission/ 权限;test_common/ 通用查询
 conftest.py    cfg/db/client(裸)/auth(唯一会话)/env_check(开关快照)fixture
 pytest.ini     标记:smoke/regression/permission/db_check/manual
 Jenkinsfile    gyj-api-pytest Job 入口
@@ -70,5 +71,6 @@ Jenkinsfile    gyj-api-pytest Job 入口
 
 ## 已知遗留
 
-- `/supplier/findBySelect_*` 系列缺参即"未知异常"(NPE),参数语义待 Fiddler 抓包确认后补测(对应用例集 12_接口回填记录)。
-- 权限反例(permission 标记)与报表对账用例按用例集排期分批补充。
+- 报文口径与抓包结论以《接口清单与报文分析记录》(F:\jsh-ERP-test\06-报文分析\,GYJ-MSG-001,2026-10-31)为准;用例集 12_接口回填记录的待复核要点已全部关闭。
+- `depotHead/debtList` 不收录采购方向欠款、`getStatementAccount` 未审核单不计(已按 skip 记录实测行为,待确认口径后翻转断言)。
+- 新增缺陷候选(2026-10-31,待提交禅道):①`depot/update` 的 principal 传负责人姓名报 500 且不落库(疑按数字 id 解析);②`getBillListByLinkNumber` 的 `andSubTypeLike("退货")` 缺 % 通配符,接口恒返回空,前端"关联退货单"展示失效;③`unit/add` ratio 无范围校验(0/负数放行)、非数字 500、空串 301(并入校验不一致系列);④登录态 `/tenant/add`(系统管理→租户管理→新增)恒 301——部署包对带会话请求的 jsh_user_business 插入注入 `tenant_id, 63` 字面量与实体自带租户 ID 冲突(列重复,事务回滚);未登录注册租户(/user/registerUser)实测可用,注册功能不受影响;另:部署 jar 含该注入而公开源码 8f5dc08 无(版本不一致,源码对照需以容器实测为准);⑤有过交易历史的商品/仓库接口删除被 601 拦截(依赖检查计入库存残留行/已逻辑删单据明细,页面同样删不掉)。

@@ -16,11 +16,12 @@ from api.material_api import MaterialApi
 from api.supplier_api import SupplierApi
 from common.asserts import assert_code_ok
 from common.dataloader import load_cases
+from utils.cleanup import delete_bills_with_fallback, delete_depots_with_fallback
 from utils.dynamic import exp_id
 
 
 @pytest.fixture(scope="module")
-def purchase_env(auth):
+def purchase_env(auth, db):
     """矩阵共享一套基础资料;成功建的单在 teardown 统一删除(未审核,无状态机障碍)。"""
     c = auth["client"]
     stamp = exp_id()
@@ -43,11 +44,10 @@ def purchase_env(auth):
     missing = [k for k in ("supplier_id", "depot_id", "account_id", "material_id") if not env[k]]
     assert not missing, f"基础资料提取 ID 失败: {missing}"
     yield env
-    if env["bill_ids"]:
-        env["bill"].delete_batch(env["bill_ids"])
+    delete_bills_with_fallback(c, db, env["bill_ids"])
     mat.delete_batch([env["material_id"]])
     sup.delete_batch([env["supplier_id"]])
-    depot.delete_batch([env["depot_id"]])
+    delete_depots_with_fallback(c, db, [env["depot_id"]])
     acc.delete_batch([env["account_id"]])
 
 

@@ -8,6 +8,7 @@
 - batchSetAdvanceIn 直接设值被实时重算覆盖(DEF-EXP-01,FIN-013 缺陷回归)。
 未实现:SALE-011/RET-006 多账户(multi_account_flag=0)、SALE-016/RET-009 超量退货(待实测)。
 """
+import json
 from datetime import datetime
 
 import allure
@@ -20,6 +21,7 @@ from api.depot_head_api import DepotHeadApi
 from api.material_api import MaterialApi
 from api.supplier_api import SupplierApi
 from common.asserts import assert_code_ok
+from utils.cleanup import delete_bills_with_fallback, delete_depots_with_fallback, delete_materials_with_fallback
 from utils.dynamic import exp_id
 
 
@@ -72,16 +74,10 @@ def sale_env(auth, db):
 
     s.update({"make_sale": make_sale})
     yield s
-    for bid in list(dict.fromkeys(s["bill_ids"])):
-        row = db.query_one("SELECT status FROM jsh_depot_head WHERE id=%s", (bid,))
-        if row and str(row["status"]) in ("1", "3"):
-            s["bill"].batch_set_status("0", [bid])
-        body = s["bill"].delete_batch([bid]).json()
-        if body.get("code") != 200:
-            c.log.warning("teardown 单据 %s 删除失败: %s", bid, body)
-    mat.delete_batch([s["material_id"]])
+    delete_bills_with_fallback(c, db, s["bill_ids"])
+    delete_materials_with_fallback(c, db, [s["material_id"]])
     sup.delete_batch([s["customer_id"]])
-    depot.delete_batch([s["depot_id"]])
+    delete_depots_with_fallback(c, db, [s["depot_id"]])
     acc.delete_batch([s["account_id"]])
 
 
@@ -344,6 +340,7 @@ class TestDepotMore:
         from api.material_api import MaterialApi
         from api.depot_api import DepotApi
         mat, depot = MaterialApi(s["client"]), DepotApi(s["client"])
+        qtrk_id = cx_id = None
         try:
             assert_code_ok(mat.add(f"{name}m", f"{name}b"), "商品")
             assert_code_ok(depot.add(f"{name}d"), "仓库")
@@ -359,6 +356,8 @@ class TestDepotMore:
             assert_code_ok(s["client"].post("/depotHead/addDepotHeadAndDetail", json_body={
                 "info": __import__("json").dumps(info, ensure_ascii=False),
                 "rows": __import__("json").dumps(rows, ensure_ascii=False)}), "预置2")
+            qtrk_id = s["client"].get("/depotHead/getDetailByNumber",
+                                      params={"number": no}).json()["data"]["id"]
             # DEP-003:同仓库自身调拨被拦(8500010,调入仓库与原仓库不能重复)
             no_self = "DBCK" + s["client"].get("/sequence/buildNumber").json()["data"]["defaultNumber"]
             info_self = dict(info, number=no_self, type="出库", subType="调拨")
@@ -375,14 +374,96 @@ class TestDepotMore:
             assert_code_ok(s["client"].post("/depotHead/addDepotHeadAndDetail", json_body={
                 "info": __import__("json").dumps(info2, ensure_ascii=False),
                 "rows": __import__("json").dumps(rows2, ensure_ascii=False)}), "拆卸+1")
+            cx_id = s["client"].get("/depotHead/getDetailByNumber",
+                                    params={"number": no2}).json()["data"]["id"]
             head = s["db"].query_one(
                 "SELECT sub_type FROM jsh_depot_head WHERE number=%s AND tenant_id=%s",
                 (no2, s["tenant_id"]))
             assert head["sub_type"] == "拆卸"
         finally:
+            delete_bills_with_fallback(s["client"], s["db"],
+                                       [b for b in (qtrk_id, cx_id) if b])
             for m in (f"{name}m",):
                 r = mat.find_by_name(m)
                 if r:
-                    mat.delete_batch([r["id"]])
-            depot.delete_batch([depot.find_id_by_name(f"{name}d")])
+                    delete_materials_with_fallback(s["client"], s["db"], [r["id"]])
+            delete_depots_with_fallback(s["client"], s["db"], [dep_id])
             s["sup"].delete_batch([sup_id])
+
+@allure.feature("销售管理")
+@pytest.mark.regression
+@pytest.mark.usefixtures("env_check")
+class TestSaleParamEdge:
+    """销售参数边界补充(2026-10-31 探针取证):数量0放行(与采购对称,校验缺失),
+    负单价被 8500018 最低售价拦截(与采购放行形成差异——售价比校验挡住),
+    多账户收款分摊落库(flag=1)。"""
+
+    @allure.title("API-SALE-021 出库数量为0实测放行——缺陷回归")
+    def test_021_zero_qty(self, sale_env):
+        s = sale_env
+        no = "XSCK" + s["bill"].build_number()
+        info = {"operTime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "number": no,
+                "type": "出库", "subType": "销售", "organId": s["customer_id"],
+                "accountId": s["account_id"], "changeAmount": 0,
+                "discountLastMoney": 0, "totalPrice": 0, "status": "0"}
+        rows = [{"materialId": s["material_id"], "barCode": s["bar_code"], "depotId": s["depot_id"],
+                 "operNumber": 0, "unitPrice": 20, "allPrice": 0, "taxRate": 0,
+                 "taxMoney": 0, "taxLastMoney": 0, "unit": "个"}]
+        assert_code_ok(s["bill"].add(info, rows), "数量0建单(缺陷现状)")
+        s["bill_ids"].append(s["bill"].get_detail_by_number(no).json()["data"]["id"])
+
+    @allure.title("API-SALE-020 出库负单价被 8500018 最低售价拦截(与采购放行差异)")
+    def test_020_negative_price(self, sale_env):
+        s = sale_env
+        no = "XSCK" + s["bill"].build_number()
+        info = {"operTime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "number": no,
+                "type": "出库", "subType": "销售", "organId": s["customer_id"],
+                "accountId": s["account_id"], "changeAmount": -10,
+                "discountLastMoney": -10, "totalPrice": -10, "status": "0"}
+        rows = [{"materialId": s["material_id"], "barCode": s["bar_code"], "depotId": s["depot_id"],
+                 "operNumber": 1, "unitPrice": -10, "allPrice": -10, "taxRate": 0,
+                 "taxMoney": 0, "taxLastMoney": -10, "unit": "个"}]
+        body = s["bill"].add(info, rows).json()
+        assert body.get("code") == 8500018, f"负单价应被 8500018 拦截,实际: {body}"
+
+    @allure.title("API-SALE-011 多账户收款:两账户分摊 12/8 落库(flag=1,db_check)")
+    @pytest.mark.db_check
+    def test_011_multi_account(self, sale_env):
+        """与 PUR-021 对称:紧凑 JSON 数组字符串,金额和绝对值=changeAmount 绝对值。"""
+        from api.account_api import AccountApi
+        from api.system_config_api import SystemConfigApi
+        s = sale_env
+        syscfg = SystemConfigApi(s["client"])
+        flag_before = syscfg.get_current_info().get("multiAccountFlag")
+        a1, a2 = exp_id("EXPFa"), exp_id("EXPFa")
+        acc_ids = []
+        try:
+            syscfg.update_field("multiAccountFlag", "1")
+            for an in (a1, a2):
+                assert_code_ok(AccountApi(s["client"]).add(an, initial=100), "账户")
+                acc_ids.append(s["db"].query_one(
+                    "SELECT id FROM jsh_account WHERE name=%s AND delete_flag=0", (an,))["id"])
+            no = "XSCK" + s["bill"].build_number()
+            info = {"operTime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "number": no,
+                    "type": "出库", "subType": "销售", "organId": s["customer_id"],
+                    "accountIdList": json.dumps(acc_ids), "accountMoneyList": "[12,8]",
+                    "changeAmount": 20, "discountLastMoney": 20, "totalPrice": 20, "status": "0"}
+            rows = [{"materialId": s["material_id"], "barCode": s["bar_code"], "depotId": s["depot_id"],
+                     "operNumber": 1, "unitPrice": 20, "allPrice": 20, "taxRate": 0,
+                     "taxMoney": 0, "taxLastMoney": 20, "unit": "个"}]
+            assert_code_ok(s["bill"].add(info, rows), "多账户出库")
+            head = s["db"].query_one(
+                "SELECT account_id_list, account_money_list FROM jsh_depot_head WHERE number=%s AND delete_flag=0",
+                (no,))
+            assert head and head["account_money_list"] == "12,8", f"分摊金额应落库: {head}"
+            s["bill_ids"].append(s["db"].query_one(
+                "SELECT id FROM jsh_depot_head WHERE number=%s AND delete_flag=0", (no,))["id"])
+        finally:
+            if flag_before is not None:
+                syscfg.update_field("multiAccountFlag", flag_before)
+            for an in (a1, a2):
+                row = s["db"].query_one(
+                    "SELECT id FROM jsh_account WHERE name=%s AND delete_flag=0", (an,))
+                if row:
+                    s["client"].delete("/account/deleteBatch", params={"ids": f"{row['id']},"})
+
